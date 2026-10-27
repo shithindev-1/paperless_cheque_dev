@@ -1,0 +1,9 @@
+[project]
+name = "paperless-cheque-ocr-api"
+version = "1.0.0"
+description = "Extracts cheque details and matches cheques to expected rent payments."
+requires-python = ">=3.12"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"

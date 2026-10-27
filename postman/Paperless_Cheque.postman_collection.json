@@ -1,0 +1,192 @@
+{
+  "info": {
+    "name": "Paperless Cheque OCR API",
+    "description": "Requests for the Paperless Cheque OCR API. Start the server with `uvicorn app.main:app --reload` first.\n\nFor the extract requests, open the Body tab and pick your cheque image/PDF in each `files` row.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    { "key": "baseUrl", "value": "http://localhost:8080/api/v1" }
+  ],
+  "item": [
+    {
+      "name": "Health",
+      "request": {
+        "method": "GET",
+        "url": "{{baseUrl}}/health"
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('Status 200', () => pm.response.to.have.status(200));",
+              "pm.test('Status is ok', () => pm.expect(pm.response.json().status).to.eql('ok'));"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "Extract - single cheque",
+      "request": {
+        "method": "POST",
+        "url": "{{baseUrl}}/cheques/extract",
+        "body": {
+          "mode": "formdata",
+          "formdata": [
+            { "key": "files", "type": "file", "src": [] }
+          ]
+        }
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('Status 200', () => pm.response.to.have.status(200));",
+              "const body = pm.response.json();",
+              "pm.test('One result per file', () => pm.expect(body.results).to.be.an('array').that.is.not.empty);",
+              "body.results.forEach(r => {",
+              "  pm.test(`${r.file_name}: success`, () => pm.expect(r.status, r.error).to.eql('success'));",
+              "  (r.cheques || []).forEach((c, i) => {",
+              "    pm.test(`${r.file_name} cheque ${i + 1}: has fields`, () => {",
+              "      pm.expect(c).to.have.all.keys('cheque_date', 'cheque_amount', 'installment_number', 'service');",
+              "    });",
+              "  });",
+              "});"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "Extract - multiple cheques",
+      "request": {
+        "method": "POST",
+        "url": "{{baseUrl}}/cheques/extract",
+        "body": {
+          "mode": "formdata",
+          "formdata": [
+            { "key": "files", "type": "file", "src": [] },
+            { "key": "files", "type": "file", "src": [] }
+          ]
+        }
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('Status 200', () => pm.response.to.have.status(200));",
+              "pm.test('Result count matches file count', () => pm.expect(pm.response.json().results.length).to.eql(2));"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "Match - cheques vs payments",
+      "request": {
+        "method": "POST",
+        "header": [{ "key": "Content-Type", "value": "application/json" }],
+        "url": "{{baseUrl}}/cheques/match",
+        "body": {
+          "mode": "raw",
+          "options": { "raw": { "language": "json" } },
+          "raw": "{\n  \"file_urls\": [\"cheque1.jpg\", \"cheque2.jpg\"],\n  \"payments\": [\n    {\"RentPaymentId\": 94814, \"Installment\": 1, \"ServiceId\": 1, \"ServiceDescription\": \"Property Rent\", \"Amount\": 8400, \"DueDate\": \"2026-11-05T00:00:00\"},\n    {\"RentPaymentId\": 94815, \"Installment\": 2, \"ServiceId\": 1, \"ServiceDescription\": \"Property Rent\", \"Amount\": 8400, \"DueDate\": \"2026-10-17T00:00:00\"},\n    {\"RentPaymentId\": 94819, \"Installment\": 1, \"ServiceId\": 4, \"ServiceDescription\": \"VAT on Rent\", \"Amount\": 840, \"DueDate\": \"2026-08-14T00:00:00\"}\n  ]\n}"
+        }
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('Status 200', () => pm.response.to.have.status(200));",
+              "const body = pm.response.json();",
+              "pm.test('One item per payment', () => pm.expect(body).to.be.an('array').that.is.not.empty);",
+              "body.forEach(p => {",
+              "  pm.test(`Payment ${p.RentPaymentId}: has match keys`, () => {",
+              "    pm.expect(p).to.include.keys('MatchedWithOcr', 'MatchedOcrFile', 'OcrResponse');",
+              "    if (!p.MatchedWithOcr) pm.expect(p.MatchedOcrFile).to.be.null;",
+              "  });",
+              "});"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "Match - empty payments (expect 400)",
+      "request": {
+        "method": "POST",
+        "header": [{ "key": "Content-Type", "value": "application/json" }],
+        "url": "{{baseUrl}}/cheques/match",
+        "body": {
+          "mode": "raw",
+          "options": { "raw": { "language": "json" } },
+          "raw": "{\n  \"file_urls\": [\"cheque1.jpg\"],\n  \"payments\": []\n}"
+        }
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('Status 400', () => pm.response.to.have.status(400));",
+              "pm.test('Has error message', () => pm.expect(pm.response.json()).to.have.property('error'));"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "Negative - no files (expect 422)",
+      "request": {
+        "method": "POST",
+        "url": "{{baseUrl}}/cheques/extract",
+        "body": { "mode": "formdata", "formdata": [] }
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('Status 422', () => pm.response.to.have.status(422));",
+              "pm.test('Has error message', () => pm.expect(pm.response.json()).to.have.property('error'));"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "Negative - unsupported file type",
+      "request": {
+        "method": "POST",
+        "url": "{{baseUrl}}/cheques/extract",
+        "body": {
+          "mode": "formdata",
+          "formdata": [
+            { "key": "files", "type": "text", "value": "this is not a cheque" }
+          ]
+        }
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('Not a server error', () => pm.expect(pm.response.code).to.be.below(500));"
+            ]
+          }
+        }
+      ]
+    }
+  ]
+}
