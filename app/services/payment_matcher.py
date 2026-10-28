@@ -15,6 +15,8 @@ _OVERLAP_NOTE = " Some cheques are overlapped and could not be fully read."
 @dataclass
 class _Candidate:
     url: str
+    file_index: int
+    cheque_index: int
     cheque: ChequeEntity
     used: bool = False
 
@@ -37,24 +39,27 @@ def _fmt_date(value: Optional[date]) -> str:
     return value.strftime("%d-%m-%Y") if value else "unreadable"
 
 
-def _cheque_file(result: FileResult, index: int, source: str) -> str:
-    """Processed (cropped / rotated) file for this cheque if there is one, else the source."""
-    if index < len(result.cheque_files):
-        return result.cheque_files[index]
-    return source
+@dataclass
+class Match:
+    """A matched payment and where its cheque is: files[file_index].cheques[cheque_index]."""
+    payment: RentPayment
+    file_index: int
+    cheque_index: int
 
 
-def match_payments(payments: list[RentPayment], files: list[tuple[str, FileResult]]) -> None:
-    """Fill MatchedWithOcr / MatchedOcrFile / OcrResponse on each payment, in place.
+def match_payments(payments: list[RentPayment], files: list[tuple[str, FileResult]]) -> list[Match]:
+    """Fill MatchedWithOcr / MatchedOcrFileURL / OcrResponse on each payment, in place.
 
     A cheque matches a payment when its amount and date equal Amount and DueDate.
-    Each cheque is used for at most one payment.
+    Each cheque is used for at most one payment. CroppedOCRFileURL is left empty here;
+    the caller crops only the returned matches.
     """
     candidates = [
-        _Candidate(_cheque_file(result, i, url), c)
-        for url, result in files
+        _Candidate(url, f, i, c)
+        for f, (url, result) in enumerate(files)
         for i, c in enumerate(result.cheques)
     ]
+    matches: list[Match] = []
 
     for payment in payments:
         due = payment.due_date
@@ -66,13 +71,15 @@ def match_payments(payments: list[RentPayment], files: list[tuple[str, FileResul
         if hit:
             hit.used = True
             payment.MatchedWithOcr = True
-            payment.MatchedOcrFile = hit.url
+            payment.MatchedOcrFileURL = hit.url
             payment.OcrResponse = MATCHED
+            matches.append(Match(payment, hit.file_index, hit.cheque_index))
         else:
             closest, message = _no_match(payment, due, candidates, files)
             payment.MatchedWithOcr = False
-            payment.MatchedOcrFile = closest.url if closest else None
+            payment.MatchedOcrFileURL = closest.url if closest else None
             payment.OcrResponse = message
+    return matches
 
 
 def _no_match(

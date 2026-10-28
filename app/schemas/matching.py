@@ -24,7 +24,10 @@ class RentPayment(BaseModel):
 
     # Filled by the API; any value sent in the request is ignored
     MatchedWithOcr: Optional[bool] = None
-    MatchedOcrFile: Optional[str] = None
+    MatchedOcrFileURL: Optional[str] = Field(None, description="Original file URL of the cheque")
+    CroppedOCRFileURL: Optional[str] = Field(
+        None, description="Cropped / rotated image of the cheque; null when no processing was needed"
+    )
     OcrResponse: Optional[str] = Field(None, description="'Matched', or why it did not match")
 
     @field_validator("DueDate")
@@ -34,7 +37,8 @@ class RentPayment(BaseModel):
             raise ValueError(f"Unrecognised DueDate: {v!r}")  # -> 422
         return v
 
-    @field_validator("MatchedWithOcr", "MatchedOcrFile", "OcrResponse", mode="before")
+    @field_validator("MatchedWithOcr", "MatchedOcrFileURL", "CroppedOCRFileURL", "OcrResponse",
+                     mode="before")
     @classmethod
     def _ignore_input(cls, v):
         return None

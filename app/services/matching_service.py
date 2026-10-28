@@ -15,7 +15,7 @@ from app.schemas import FileResult, MatchRequest, RentPayment, TokenUsage
 from app.services.cheque_extractor import ChequeExtractor
 from app.services.cheque_imaging import attach_cheque_files
 from app.services.file_loader import file_name_from_source, load_file, redact
-from app.services.payment_matcher import match_payments
+from app.services.payment_matcher import Match, match_payments
 from app.utils.files import UploadedFile
 
 logger = logging.getLogger(__name__)
@@ -24,7 +24,7 @@ logger = logging.getLogger(__name__)
 async def match_cheques(
     request: MatchRequest, settings: Settings, extractor: ChequeExtractor
 ) -> list[RentPayment]:
-    """Load + extract every file, then fill MatchedWithOcr / MatchedOcrFile / OcrResponse."""
+    """Load + extract every file, then fill MatchedWithOcr / MatchedOcrFileURL / CroppedOCRFileURL / OcrResponse."""
     if not request.payments:
         raise InvalidRequestError("The payment list is empty.")
     if not request.file_urls:
@@ -40,8 +40,9 @@ async def match_cheques(
     logger.info("[%s] Match request: %d file(s), %d payment(s), model=%s",
                 request_id, len(sources), len(payments), settings.gemini_model)
 
-    results = await _extract_all(sources, settings, extractor, request_id)
-    match_payments(payments, list(zip(sources, results)))
+    results, uploads = await _extract_all(sources, settings, extractor, request_id)
+    matches = match_payments(payments, list(zip(sources, results)))
+    await _crop_matched(matches, sources, results, uploads, settings, request_id)
 
     _log(request_id, settings, sources, results, payments, start)
     return payments
@@ -49,23 +50,35 @@ async def match_cheques(
 
 async def _extract_all(
     sources: list[str], settings: Settings, extractor: ChequeExtractor, request_id: str
-) -> list[FileResult]:
-    """One FileResult per source, in the same order as `sources`."""
+) -> tuple[list[FileResult], dict[int, UploadedFile]]:
+    """One FileResult per source (same order as `sources`), plus the loaded files by index."""
     async with httpx.AsyncClient(timeout=settings.download_timeout_seconds) as client:
         loaded = await asyncio.gather(*(_load(s, client, settings, request_id) for s in sources))
 
     results: list[Optional[FileResult]] = [r if isinstance(r, FileResult) else None for r in loaded]
-    to_extract = [(i, f) for i, f in enumerate(loaded) if isinstance(f, UploadedFile)]
-    extracted = await extractor.extract_many([f for _, f in to_extract])
-    for (i, _), result in zip(to_extract, extracted):
+    uploads = {i: f for i, f in enumerate(loaded) if isinstance(f, UploadedFile)}
+    extracted = await extractor.extract_many(list(uploads.values()))
+    for i, result in zip(uploads, extracted):
         results[i] = result
+    return results, uploads
 
-    # Crop / rotate where needed; each cheque then carries its own file URL
+
+async def _crop_matched(
+    matches: list[Match], sources: list[str], results: list[FileResult],
+    uploads: dict[int, UploadedFile], settings: Settings, request_id: str,
+) -> None:
+    """Crop / rotate only the matched cheques and set CroppedOCRFileURL on their payments."""
+    wanted: dict[int, set[int]] = {}
+    for m in matches:
+        wanted.setdefault(m.file_index, set()).add(m.cheque_index)
+
     await asyncio.gather(*(
-        attach_cheque_files(sources[i], f, results[i], settings, request_id)
-        for i, f in to_extract if results[i].status == "success"
+        attach_cheque_files(sources[f], uploads[f], results[f], settings, request_id, only=indexes)
+        for f, indexes in wanted.items()
     ))
-    return results
+    for m in matches:
+        cropped = results[m.file_index].cheque_files[m.cheque_index]
+        m.payment.CroppedOCRFileURL = cropped if cropped != sources[m.file_index] else None
 
 
 async def _load(
@@ -93,10 +106,11 @@ def _log(
     elapsed_ms = int((time.perf_counter() - start) * 1000)
 
     for p in payments:
-        logger.info("[%s] Payment %s (inst %s, %s, %s, %s): matched=%s file=%s | %s",
+        logger.info("[%s] Payment %s (inst %s, %s, %s, %s): matched=%s file=%s cropped=%s | %s",
                     request_id, p.RentPaymentId, p.Installment, p.ServiceDescription,
                     p.Amount, p.DueDate, p.MatchedWithOcr,
-                    redact(p.MatchedOcrFile or "-"), p.OcrResponse)
+                    redact(p.MatchedOcrFileURL or "-"), redact(p.CroppedOCRFileURL or "-"),
+                    p.OcrResponse)
     logger.info(
         "[%s] Match completed: %d/%d payments matched | files ok=%d/%d | "
         "tokens: prompt=%d output=%d thinking=%d total=%d | %d ms",
@@ -115,7 +129,9 @@ def _log(
         "processing_time_ms": elapsed_ms,
         "files": [{"source": redact(s), **r.log_entry()} for s, r in zip(sources, results)],
         "payments": [
-            {**p.model_dump(), "MatchedOcrFile": redact(p.MatchedOcrFile) if p.MatchedOcrFile else None}
+            {**p.model_dump(),
+             "MatchedOcrFileURL": redact(p.MatchedOcrFileURL) if p.MatchedOcrFileURL else None,
+             "CroppedOCRFileURL": redact(p.CroppedOCRFileURL) if p.CroppedOCRFileURL else None}
             for p in payments
         ],
     })

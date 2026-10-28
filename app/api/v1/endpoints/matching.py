@@ -17,6 +17,7 @@ async def match_cheques_to_payments(
 ) -> list[RentPayment]:
     """Read the cheque files and match them to the expected payments by Amount + DueDate.
 
-    Returns the payment list with MatchedWithOcr, MatchedOcrFile and OcrResponse filled.
+    Returns the payment list with MatchedWithOcr, MatchedOcrFileURL, CroppedOCRFileURL
+    and OcrResponse filled. CroppedOCRFileURL is null unless the cheque was cropped / rotated.
     """
     return await match_cheques(request, settings, extractor)

@@ -22,8 +22,8 @@ def _result(*cheques) -> FileResult:
 
 
 def test_processed_name():
-    assert processed_name("App/OCR/Temp/abc.jpeg", "_processed", 1) == "App/OCR/Temp/abc_processed_1.jpeg"
-    assert processed_name("cheque_1.pdf", "_processed", 2) == "cheque_1_processed_2.jpeg"
+    assert processed_name("App/OCR/Temp/abc.jpeg", "_ocr", 1, 1) == "App/OCR/Temp/abc_ocr.pdf"
+    assert processed_name("cheque_1.pdf", "_ocr", 2, 3) == "cheque_1_ocr_2.pdf"
 
 
 async def test_no_processing_keeps_original(settings):
@@ -40,8 +40,19 @@ async def test_local_processing_writes_next_to_original(settings, tmp_path):
     )
     await attach_cheque_files("c.jpeg", UploadedFile("c.jpeg", _jpeg(), "image/jpeg"),
                               result, settings, "t")
-    assert result.cheque_files == ["c_processed_1.jpeg", "c_processed_2.jpeg"]
-    assert (tmp_path / "c_processed_1.jpeg").stat().st_size > 0
+    assert result.cheque_files == ["c_ocr_1.pdf", "c_ocr_2.pdf"]
+    assert (tmp_path / "c_ocr_1.pdf").read_bytes().startswith(b"%PDF")
+
+
+async def test_only_requested_cheques_are_processed(settings, tmp_path):
+    result = _result(
+        ChequeOcr(page=1, bounding_box=[0, 0, 500, 1000], needs_crop=True),
+        ChequeOcr(page=1, bounding_box=[500, 0, 1000, 1000], needs_crop=True),
+    )
+    await attach_cheque_files("c.jpeg", UploadedFile("c.jpeg", _jpeg(), "image/jpeg"),
+                              result, settings, "t", only={1})
+    assert result.cheque_files == ["c.jpeg", "c_ocr_2.pdf"]
+    assert not (tmp_path / "c_ocr_1.pdf").exists()
 
 
 async def test_failed_cheque_keeps_original(settings):

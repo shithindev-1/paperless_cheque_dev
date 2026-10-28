@@ -1,8 +1,9 @@
 """Crop / straighten extracted cheques and save them next to the original file.
 
-A processed image is created only when a file holds several cheques, or the OCR
-model reports the cheque needs cropping or rotation. Otherwise (or on any failure)
-the cheque keeps the original file URL. Results go into FileResult.cheque_files.
+Only the cheques asked for (the matched ones) are processed, and only when the file
+holds several cheques or the OCR model reports the cheque needs cropping or rotation.
+Otherwise (or on any failure) the cheque keeps the original file URL. Results go into
+FileResult.cheque_files.
 """
 
 import asyncio
@@ -19,25 +20,33 @@ from app.utils.files import UploadedFile
 
 logger = logging.getLogger(__name__)
 
-_JPEG = "image/jpeg"
+_PDF = "application/pdf"
 
 
 async def attach_cheque_files(
-    source: str, file: UploadedFile, result: FileResult, settings: Settings, request_id: str
+    source: str, file: UploadedFile, result: FileResult, settings: Settings, request_id: str,
+    only: Optional[set[int]] = None,
 ) -> None:
-    """Fill result.cheque_files with one URL / path per cheque."""
+    """Fill result.cheque_files with one URL / path per cheque.
+
+    `only` limits processing to these cheque indexes (0-based); the rest keep the original.
+    """
     cheques = result.cheques
     result.cheque_files = [source] * len(cheques)
     if not cheques or not settings.image_processing_enabled or not needs_processing(cheques):
         return
+    if only is not None and not only:
+        return
 
-    save = _saver(source, settings)
+    save = _saver(source, settings, len(cheques))
     if save is None:
         logger.info("[%s] %s needs crop/rotation but has no writable location; keeping original",
                     request_id, redact(source))
         return
 
     for i, cheque in enumerate(cheques, start=1):
+        if only is not None and i - 1 not in only:
+            continue
         try:
             image = await asyncio.to_thread(
                 process_cheque, file.data, file.mime_type, cheque,
@@ -54,14 +63,16 @@ async def attach_cheque_files(
                              request_id, i, redact(source))
 
 
-def processed_name(name: str, suffix: str, index: int) -> str:
-    """'dir/abc.jpeg' -> 'dir/abc_processed_1.jpeg' (always .jpeg)."""
+def processed_name(name: str, suffix: str, index: int, total: int) -> str:
+    """'dir/abc.jpeg' -> 'dir/abc_ocr.pdf'; several cheques -> 'dir/abc_ocr_1.pdf', ... (always .pdf)."""
     path = PurePosixPath(name)
-    return str(path.with_name(f"{path.stem}{suffix}_{index}.jpeg"))
+    number = f"_{index}" if total > 1 else ""
+    return str(path.with_name(f"{path.stem}{suffix}{number}.pdf"))
 
 
-def _saver(source: str, settings: Settings):
-    """Async `save(index, jpeg_bytes) -> url_or_path` for this source, or None if not writable."""
+def _saver(source: str, settings: Settings, total: int):
+    """Async `save(index, pdf_bytes) -> url_or_path` for this source, or None if not writable."""
+    suffix = settings.processed_file_suffix
     if is_url(source):
         storage = get_blob_storage(settings)
         blob_name: Optional[str] = storage.blob_name(source) if storage else None
@@ -69,9 +80,7 @@ def _saver(source: str, settings: Settings):
             return None
 
         async def save_blob(index: int, data: bytes) -> str:
-            return await storage.upload(
-                processed_name(blob_name, settings.processed_file_suffix, index), data, _JPEG
-            )
+            return await storage.upload(processed_name(blob_name, suffix, index, total), data, _PDF)
         return save_blob
 
     if not settings.local_files_enabled:
@@ -79,7 +88,7 @@ def _saver(source: str, settings: Settings):
     base = Path(settings.local_files_dir).resolve()
 
     async def save_local(index: int, data: bytes) -> str:
-        name = processed_name(Path(source).as_posix(), settings.processed_file_suffix, index)
+        name = processed_name(Path(source).as_posix(), suffix, index, total)
         target = (base / name).resolve()
         if not target.is_relative_to(base):
             raise ValueError("Processed file path escapes LOCAL_FILES_DIR")

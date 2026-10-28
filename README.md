@@ -182,7 +182,8 @@ Response — the payment list with three keys filled (other keys are returned un
 | Key | Matched | Not matched |
 |---|---|---|
 | `MatchedWithOcr` | `true` | `false` |
-| `MatchedOcrFile` | URL of the matching file | URL of the closest cheque's file (the one quoted in `OcrResponse`); `null` if there is none |
+| `MatchedOcrFileURL` | Original URL of the matching file | Original URL of the closest cheque's file (the one quoted in `OcrResponse`); `null` if there is none |
+| `CroppedOCRFileURL` | Cropped / rotated PDF of that cheque; `null` if no processing was needed | Always `null` (unmatched cheques are not processed) |
 | `OcrResponse` | `"Matched"` | Short reason with the value read from the cheque |
 
 | Case | `OcrResponse` |
@@ -197,16 +198,17 @@ An empty `payments` or `file_urls` list returns `400`.
 
 For each file the OCR model also reports where every cheque is (bounding box), which
 page it is on, how far it must be rotated, and whether the image needs cropping.
-A processed image is created when **a file holds several cheques**, or the model reports
+Only **matched** cheques are processed. A processed image is created when **a file holds several cheques**, or the model reports
 the cheque **needs cropping or rotation**. OpenCV then crops and straightens each cheque
-and saves it next to the original:
+and saves it as a one-page PDF next to the original:
 
 ```
-.../OCR/Temp/<guid>.jpeg  ->  .../OCR/Temp/<guid>_processed_1.jpeg, _processed_2.jpeg, ...
+One cheque in the file:     .../OCR/Temp/<guid>.jpeg  ->  .../OCR/Temp/<guid>_ocr.pdf
+Several cheques in the file: .../OCR/Temp/<guid>.pdf   ->  .../OCR/Temp/<guid>_ocr_1.pdf, <guid>_ocr_2.pdf, ...
 ```
 
-`MatchedOcrFile` returns the processed image of that cheque, or the original URL when
-no processing was needed (or it failed). Files under `azure_blob_base_url` are read and
+`MatchedOcrFileURL` always returns the original file URL. `CroppedOCRFileURL` returns the
+processed image of that cheque, or `null` when no processing was needed (or it failed). Files under `azure_blob_base_url` are read and
 written with `AZURE_STORAGE_CONNECTION_STRING`; other URLs are only read. In local
 testing, processed images are written into `local_files_dir`.
 

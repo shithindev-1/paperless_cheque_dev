@@ -66,10 +66,10 @@ def test_process_image_and_pdf():
     image = _canvas(400, 800)
     jpeg = cv2.imencode(".jpg", image)[1].tobytes()
     cheque = ChequeOcr(page=1, bounding_box=[0, 0, 500, 1000], rotation_degrees=90, needs_crop=True)
-    out = cv2.imdecode(np.frombuffer(
-        process_cheque(jpeg, "image/jpeg", cheque, padding_percent=0, dpi=100, quality=90),
-        np.uint8), cv2.IMREAD_COLOR)
-    assert out.shape[:2] == (800, 200)  # 200x800 crop, turned sideways
+    pdf_out = process_cheque(jpeg, "image/jpeg", cheque, padding_percent=0, dpi=100, quality=90)
+    assert pdf_out.startswith(b"%PDF")
+    out = load_page(pdf_out, "application/pdf", page=1, dpi=100)
+    assert abs(out.shape[0] - 800) <= 2 and abs(out.shape[1] - 200) <= 2  # 200x800 crop, turned sideways
 
     doc = pymupdf.open()
     doc.new_page(width=600, height=300)

@@ -97,14 +97,23 @@ def encode_jpeg(image: np.ndarray, quality: int) -> bytes:
     return buffer.tobytes()
 
 
+def encode_pdf(image: np.ndarray, quality: int, dpi: int) -> bytes:
+    """One-page PDF holding the image (JPEG-compressed), sized so it prints at `dpi`."""
+    h, w = image.shape[:2]
+    with pymupdf.open() as doc:
+        page = doc.new_page(width=w * 72 / dpi, height=h * 72 / dpi)
+        page.insert_image(page.rect, stream=encode_jpeg(image, quality))
+        return doc.tobytes(garbage=3, deflate=True)
+
+
 def process_cheque(
     data: bytes, mime_type: str, cheque: ChequeOcr,
     *, padding_percent: float, dpi: int, quality: int,
 ) -> bytes:
-    """Return the cropped, upright cheque as JPEG bytes."""
+    """Return the cropped, upright cheque as a one-page PDF."""
     page = load_page(data, mime_type, cheque.page or 1, dpi)
-    return encode_jpeg(rotate(crop(page, cheque.bounding_box, padding_percent),
-                              cheque.rotation_degrees), quality)
+    return encode_pdf(rotate(crop(page, cheque.bounding_box, padding_percent),
+                             cheque.rotation_degrees), quality, dpi)
 
 
 def _normalise(degrees: Optional[float]) -> float:

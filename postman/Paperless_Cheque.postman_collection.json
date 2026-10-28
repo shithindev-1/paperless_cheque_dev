@@ -138,8 +138,7 @@
               "pm.test('One item per payment', () => pm.expect(body).to.be.an('array').that.is.not.empty);",
               "body.forEach(p => {",
               "  pm.test(`Payment ${p.RentPaymentId}: has match keys`, () => {",
-              "    pm.expect(p).to.include.keys('MatchedWithOcr', 'MatchedOcrFile', 'OcrResponse');",
-              "    if (!p.MatchedWithOcr) pm.expect(p.MatchedOcrFile).to.be.null;",
+              "    pm.expect(p).to.include.keys('MatchedWithOcr', 'MatchedOcrFileURL', 'CroppedOCRFileURL', 'OcrResponse');",
               "  });",
               "});"
             ]

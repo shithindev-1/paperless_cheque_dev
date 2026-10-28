@@ -20,7 +20,8 @@ def test_match_on_amount_and_date_any_format():
     match_payments(payments, [_file("cheque_1.pdf", (10000, "27-09-2024"))])
 
     assert payments[0].MatchedWithOcr is True
-    assert payments[0].MatchedOcrFile == "cheque_1.pdf"
+    assert payments[0].MatchedOcrFileURL == "cheque_1.pdf"
+    assert payments[0].CroppedOCRFileURL is None  # not processed
     assert payments[0].OcrResponse == MATCHED
 
 
@@ -30,7 +31,8 @@ def test_each_cheque_used_once():
 
     assert payments[0].MatchedWithOcr is True
     assert payments[1].MatchedWithOcr is False
-    assert payments[1].MatchedOcrFile is None
+    assert payments[1].MatchedOcrFileURL is None
+    assert payments[1].CroppedOCRFileURL is None
     assert "already matched" in payments[1].OcrResponse
 
 
@@ -39,7 +41,7 @@ def test_date_mismatch_shows_cheque_date():
     match_payments(payments, [_file("c3.pdf", (5000, "01-10-2026"))])
 
     assert payments[0].MatchedWithOcr is False
-    assert payments[0].MatchedOcrFile == "c3.pdf"  # closest cheque's file, even when unmatched
+    assert payments[0].MatchedOcrFileURL == "c3.pdf"  # closest cheque's file, even when unmatched
     assert payments[0].OcrResponse == "Date doesn't match. Cheque date is 01-10-2026."
 
 
@@ -73,9 +75,10 @@ def test_no_cheques_at_all():
 
 def test_input_match_fields_are_ignored():
     payment = RentPayment(Amount=1, DueDate="2026-01-01", MatchedWithOcr=True,
-                          MatchedOcrFile="x", OcrResponse="y")
+                          MatchedOcrFileURL="x", CroppedOCRFileURL="z", OcrResponse="y")
     assert payment.MatchedWithOcr is None
-    assert payment.MatchedOcrFile is None
+    assert payment.MatchedOcrFileURL is None
+    assert payment.CroppedOCRFileURL is None
     assert payment.OcrResponse is None
 
 
@@ -84,14 +87,16 @@ def test_extra_keys_are_kept():
     assert payment.model_dump()["ContractNo"] == "C-1"
 
 
-def test_processed_file_returned_per_cheque():
-    source, result = _file("multi.pdf", (8400, "05-11-2026"), (840, "05-11-2026"))
-    result.cheque_files = ["multi_processed_1.jpeg", "multi_processed_2.jpeg"]
-    payments = [_payment(1, 840, "2026-11-05"), _payment(2, 8400, "2026-11-05")]
-    match_payments(payments, [(source, result)])
+def test_only_matched_cheques_are_returned_for_cropping():
+    files = [_file("a.pdf", (100, "01-01-2026")),
+             _file("multi.pdf", (8400, "05-11-2026"), (840, "05-11-2026"))]
+    payments = [_payment(1, 840, "2026-11-05"), _payment(2, 999, "2026-11-05")]
+    matches = match_payments(payments, files)
 
-    assert payments[0].MatchedOcrFile == "multi_processed_2.jpeg"
-    assert payments[1].MatchedOcrFile == "multi_processed_1.jpeg"
+    assert [(m.payment.RentPaymentId, m.file_index, m.cheque_index) for m in matches] == [(1, 1, 1)]
+    assert payments[0].MatchedOcrFileURL == "multi.pdf"
+    assert payments[1].MatchedWithOcr is False
+    assert payments[1].CroppedOCRFileURL is None  # unmatched: never cropped
 
 
 def test_layout_fields_never_serialised():
@@ -100,7 +105,7 @@ def test_layout_fields_never_serialised():
     cheque = ChequeOcr(cheque_amount=1, bounding_box=[0, 0, 10, 10], rotation_degrees=90,
                        needs_crop=True, page=1)
     result = FileResult(file_name="a.jpeg", status="success", cheques=[cheque],
-                        cheque_files=["a_processed_1.jpeg"])
+                        cheque_files=["a_ocr.pdf"])
     dumped = result.model_dump()
     assert set(dumped["cheques"][0]) == {"cheque_date", "cheque_amount", "installment_number",
                                          "service", "error"}

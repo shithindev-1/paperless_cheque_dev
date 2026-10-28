@@ -97,7 +97,7 @@ class Settings(BaseSettings):
 
     # ── Cheque image processing (/cheques/match) ──
     image_processing_enabled: bool = True
-    processed_file_suffix: str = "_processed"
+    processed_file_suffix: str = "_ocr"
     crop_padding_percent: float = Field(2.0, ge=0.0, le=20.0)
     pdf_render_dpi: int = Field(200, ge=72, le=600)
     processed_jpeg_quality: int = Field(92, ge=50, le=100)

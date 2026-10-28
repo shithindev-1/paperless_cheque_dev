@@ -40,7 +40,7 @@
 
   "image_processing": {
     "image_processing_enabled": true,
-    "processed_file_suffix": "_processed",
+    "processed_file_suffix": "_ocr",
     "crop_padding_percent": 2.0,
     "pdf_render_dpi": 200,
     "processed_jpeg_quality": 92
