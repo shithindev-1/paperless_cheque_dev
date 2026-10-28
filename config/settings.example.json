@@ -1,0 +1,23 @@
+{
+  "_comment": "Copy to settings.<APP_ENV>.json (settings.local.json / settings.uat.json / settings.prod.json). Values here override settings.json. Not committed.",
+
+  "app": {
+    "docs_enabled": true,
+    "log_level": "INFO",
+    "cors_origins": ["https://<frontend-host>"]
+  },
+
+  "ocr_model": {
+    "gemini_model": "<model-name>"
+  },
+
+  "blob_storage": {
+    "azure_blob_base_url": "https://<account>.blob.core.windows.net/<container>/",
+    "azure_sas_expiry_hours": 0
+  },
+
+  "file_urls": {
+    "_comment": "Local testing only (APP_ENV=local): folder whose files can be referenced by name.",
+    "local_files_dir": null
+  }
+}

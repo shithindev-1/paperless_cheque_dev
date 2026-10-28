@@ -32,5 +32,24 @@ class ChequeEntity(BaseModel):
         return parsed.strftime("%d-%m-%Y") if parsed else None
 
 
+class ChequeOcr(ChequeEntity):
+    """What the OCR model returns per cheque: the entity plus layout for crop / rotation.
+
+    Layout fields are internal: responses are typed as ChequeEntity, so they are never
+    serialised to clients.
+    """
+
+    page: Optional[int] = Field(None, description="1-based page number (1 for images)")
+    bounding_box: Optional[list[int]] = Field(
+        None, description="[ymin, xmin, ymax, xmax] of the whole cheque, normalised 0-1000"
+    )
+    rotation_degrees: Optional[float] = Field(
+        None, description="Clockwise degrees to rotate the cheque so its text is upright"
+    )
+    needs_crop: Optional[bool] = Field(
+        None, description="True if the image contains much more than this cheque"
+    )
+
+
 class ChequeExtraction(BaseModel):
-    cheques: list[ChequeEntity]
+    cheques: list[ChequeOcr]

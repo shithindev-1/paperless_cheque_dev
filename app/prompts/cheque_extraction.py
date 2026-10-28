@@ -24,5 +24,15 @@ Extract these fields from every cheque in the attached file:
   Then a short message naming the hidden fields, e.g. "Cheque is overlapped; amount and date not fully visible."
   Still extract every field that is visible; use null for fields that are covered.
 
+Layout of each cheque (used to crop and straighten it):
+- page: 1-based page number the cheque is on (always 1 for an image).
+- bounding_box: [ymin, xmin, ymax, xmax] tightly around the whole cheque, as integers 0-1000
+  relative to that page/image (0,0 = top-left). Include the full cheque edges, nothing else.
+- rotation_degrees: degrees to rotate the cheque CLOCKWISE so its printed text is upright and
+  horizontal. Use 0, 90, 180 or 270 for sideways/upside-down cheques, plus any slight tilt
+  (e.g. 3.5 or -2). 0 if already upright and straight.
+- needs_crop: true if the page/image shows much more than this cheque (other cheques,
+  documents, table/background, wide margins); false if the cheque already fills it.
+
 If the file contains no cheque, return {"cheques": []}.
 """.strip()

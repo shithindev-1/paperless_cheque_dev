@@ -1,4 +1,8 @@
-"""Load cheque files from Azure URLs (or, for local testing, from LOCAL_FILES_DIR)."""
+"""Load cheque files from Azure URLs (or, for local testing, from LOCAL_FILES_DIR).
+
+URLs inside AZURE_BLOB_BASE_URL are read with the storage connection string, so they
+need no SAS token. Other allowed https URLs are downloaded directly.
+"""
 
 from pathlib import Path, PurePosixPath
 from urllib.parse import unquote, urlparse
@@ -7,6 +11,7 @@ import httpx
 
 from app.core.config import Settings
 from app.core.exceptions import FileDownloadError, FileValidationError
+from app.services.blob_storage import get_blob_storage
 from app.utils.files import UploadedFile, validate_file
 
 
@@ -28,6 +33,11 @@ def redact(source: str) -> str:
 async def load_file(source: str, client: httpx.AsyncClient, settings: Settings) -> UploadedFile:
     """Load and validate one file. Raises FileValidationError / FileDownloadError."""
     if is_url(source):
+        storage = get_blob_storage(settings)
+        blob_name = storage.blob_name(source) if storage else None
+        if blob_name:
+            data, content_type = await storage.download(blob_name)
+            return validate_file(file_name_from_source(source), data, content_type, settings)
         return await _download(source, client, settings)
     return _read_local(source, settings)
 

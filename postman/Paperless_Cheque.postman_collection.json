@@ -5,7 +5,14 @@
     "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
   },
   "variable": [
-    { "key": "baseUrl", "value": "http://localhost:8080/api/v1" }
+    {
+      "key": "baseUrl",
+      "value": "http://localhost:8080/api/v1"
+    },
+    {
+      "key": "apiKey",
+      "value": ""
+    }
   ],
   "item": [
     {
@@ -35,7 +42,11 @@
         "body": {
           "mode": "formdata",
           "formdata": [
-            { "key": "files", "type": "file", "src": [] }
+            {
+              "key": "files",
+              "type": "file",
+              "src": []
+            }
           ]
         }
       },
@@ -69,8 +80,16 @@
         "body": {
           "mode": "formdata",
           "formdata": [
-            { "key": "files", "type": "file", "src": [] },
-            { "key": "files", "type": "file", "src": [] }
+            {
+              "key": "files",
+              "type": "file",
+              "src": []
+            },
+            {
+              "key": "files",
+              "type": "file",
+              "src": []
+            }
           ]
         }
       },
@@ -91,11 +110,20 @@
       "name": "Match - cheques vs payments",
       "request": {
         "method": "POST",
-        "header": [{ "key": "Content-Type", "value": "application/json" }],
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
         "url": "{{baseUrl}}/cheques/match",
         "body": {
           "mode": "raw",
-          "options": { "raw": { "language": "json" } },
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          },
           "raw": "{\n  \"file_urls\": [\"cheque1.jpg\", \"cheque2.jpg\"],\n  \"payments\": [\n    {\"RentPaymentId\": 94814, \"Installment\": 1, \"ServiceId\": 1, \"ServiceDescription\": \"Property Rent\", \"Amount\": 8400, \"DueDate\": \"2026-11-05T00:00:00\"},\n    {\"RentPaymentId\": 94815, \"Installment\": 2, \"ServiceId\": 1, \"ServiceDescription\": \"Property Rent\", \"Amount\": 8400, \"DueDate\": \"2026-10-17T00:00:00\"},\n    {\"RentPaymentId\": 94819, \"Installment\": 1, \"ServiceId\": 4, \"ServiceDescription\": \"VAT on Rent\", \"Amount\": 840, \"DueDate\": \"2026-08-14T00:00:00\"}\n  ]\n}"
         }
       },
@@ -123,11 +151,20 @@
       "name": "Match - empty payments (expect 400)",
       "request": {
         "method": "POST",
-        "header": [{ "key": "Content-Type", "value": "application/json" }],
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
         "url": "{{baseUrl}}/cheques/match",
         "body": {
           "mode": "raw",
-          "options": { "raw": { "language": "json" } },
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          },
           "raw": "{\n  \"file_urls\": [\"cheque1.jpg\"],\n  \"payments\": []\n}"
         }
       },
@@ -149,7 +186,10 @@
       "request": {
         "method": "POST",
         "url": "{{baseUrl}}/cheques/extract",
-        "body": { "mode": "formdata", "formdata": [] }
+        "body": {
+          "mode": "formdata",
+          "formdata": []
+        }
       },
       "event": [
         {
@@ -172,7 +212,11 @@
         "body": {
           "mode": "formdata",
           "formdata": [
-            { "key": "files", "type": "text", "value": "this is not a cheque" }
+            {
+              "key": "files",
+              "type": "text",
+              "value": "this is not a cheque"
+            }
           ]
         }
       },
@@ -187,6 +231,63 @@
           }
         }
       ]
+    },
+    {
+      "name": "Auth - missing API key (expect 401)",
+      "request": {
+        "auth": {
+          "type": "noauth"
+        },
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "url": "{{baseUrl}}/cheques/match",
+        "body": {
+          "mode": "raw",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          },
+          "raw": "{\n  \"file_urls\": [\"cheque_1.pdf\"],\n  \"payments\": [{\"Amount\": 1, \"DueDate\": \"2026-01-01\"}]\n}"
+        }
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('Status 401', () => pm.response.to.have.status(401));",
+              "pm.test('Has error message', () => pm.expect(pm.response.json()).to.have.property('error'));"
+            ]
+          }
+        }
+      ]
     }
-  ]
+  ],
+  "auth": {
+    "type": "apikey",
+    "apikey": [
+      {
+        "key": "key",
+        "value": "X-API-Key",
+        "type": "string"
+      },
+      {
+        "key": "value",
+        "value": "{{apiKey}}",
+        "type": "string"
+      },
+      {
+        "key": "in",
+        "value": "header",
+        "type": "string"
+      }
+    ]
+  }
 }

@@ -82,3 +82,26 @@ def test_input_match_fields_are_ignored():
 def test_extra_keys_are_kept():
     payment = RentPayment(Amount=1, DueDate="2026-01-01", ContractNo="C-1")
     assert payment.model_dump()["ContractNo"] == "C-1"
+
+
+def test_processed_file_returned_per_cheque():
+    source, result = _file("multi.pdf", (8400, "05-11-2026"), (840, "05-11-2026"))
+    result.cheque_files = ["multi_processed_1.jpeg", "multi_processed_2.jpeg"]
+    payments = [_payment(1, 840, "2026-11-05"), _payment(2, 8400, "2026-11-05")]
+    match_payments(payments, [(source, result)])
+
+    assert payments[0].MatchedOcrFile == "multi_processed_2.jpeg"
+    assert payments[1].MatchedOcrFile == "multi_processed_1.jpeg"
+
+
+def test_layout_fields_never_serialised():
+    from app.schemas import ChequeOcr
+
+    cheque = ChequeOcr(cheque_amount=1, bounding_box=[0, 0, 10, 10], rotation_degrees=90,
+                       needs_crop=True, page=1)
+    result = FileResult(file_name="a.jpeg", status="success", cheques=[cheque],
+                        cheque_files=["a_processed_1.jpeg"])
+    dumped = result.model_dump()
+    assert set(dumped["cheques"][0]) == {"cheque_date", "cheque_amount", "installment_number",
+                                         "service", "error"}
+    assert "cheque_files" not in dumped

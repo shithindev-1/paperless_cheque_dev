@@ -41,13 +41,19 @@ Built with FastAPI. OCR is performed by a hosted vision model configured through
 │   │   ├── cheque_extractor.py     # OCR one/many files (concurrency, retries)
 │   │   ├── payment_matcher.py      # Pure matching rules + OcrResponse messages
 │   │   ├── file_loader.py          # Azure URL download / local test files
+│   │   ├── blob_storage.py         # Azure Blob read / write (connection string)
+│   │   ├── image_processor.py      # OpenCV crop + rotate (pure functions)
+│   │   ├── cheque_imaging.py       # When to process, and where to save
 │   │   └── gemini/                 # OCR model client and generation config
 │   └── utils/
 │       ├── dates.py                # Lenient date parsing (any common format)
 │       └── files.py                # File type detection & validation
+├── config/
+│   ├── settings.json               # Shared defaults (committed)
+│   └── settings.example.json       # Template for settings.<APP_ENV>.json (not committed)
 ├── tests/                          # Unit tests (no model calls)
 ├── postman/                        # Postman collection
-├── .env.example                    # Configuration template (copy to .env)
+├── .env.example                    # Secrets template (copy to .env)
 ├── requirements.txt
 ├── requirements-dev.txt
 └── pyproject.toml
@@ -63,35 +69,58 @@ Requires Python 3.12.
 py -3.12 -m venv .venv
 .venv\Scripts\activate
 python -m pip install -r requirements.txt
-copy .env.example .env        # then fill in the values
+copy .env.example .env                                   # secrets
+copy config\settings.example.json config\settings.local.json   # per-environment values
 python -m uvicorn app.main:app --reload --port 8080
 ```
 
 - Health check: `GET http://localhost:8080/api/v1/health`
-- Swagger UI: `http://localhost:8080/docs` (when `DOCS_ENABLED=true`)
+- Swagger UI: `http://localhost:8080/docs` (when `docs_enabled` is true) — click **Authorize** and enter the API key
 
 ### Configuration
 
-All configuration comes from environment variables / `.env` (see `.env.example`).
-The API key and model name are **required** and have no defaults in code.
+Settings are layered; later sources override earlier ones:
 
-| Variable | Purpose |
+| Order | Source | Holds | Committed |
+|---|---|---|---|
+| 1 | `config/settings.json` | Shared defaults: limits, sampling, retries, image processing | Yes |
+| 2 | `config/settings.<APP_ENV>.json` | Per environment: model name, blob base URL, CORS, docs, local folder | **No** |
+| 3 | `.env` | Secrets: `API_KEYS`, `GEMINI_API_KEY`, `AZURE_STORAGE_CONNECTION_STRING`, plus `APP_ENV` | **No** |
+| 4 | Environment variables | Any setting, by upper-case name (e.g. `MAX_FILE_SIZE_MB`) | — |
+
+Config files are grouped in sections; keys are the setting names. Unknown keys, and secrets
+placed in a config file, stop the app at startup. Moving between environments means
+changing `APP_ENV`, the matching `settings.<env>.json` and the secrets in `.env` — no code changes.
+
+| Setting | Purpose |
 |---|---|
-| `APP_ENV` | `local`, `uat` or `prod` |
-| `DOCS_ENABLED` | Expose `/docs`, `/redoc`, `/openapi.json` |
-| `GEMINI_API_KEY`, `GEMINI_MODEL` | OCR model credentials and model name (required) |
-| `GEMINI_TEMPERATURE`, `GEMINI_TOP_P`, `GEMINI_TOP_K` | Sampling |
-| `GEMINI_THINKING_BUDGET` / `GEMINI_THINKING_LEVEL` | Reasoning effort (set one) |
-| `GEMINI_MAX_RETRIES`, `GEMINI_TIMEOUT_SECONDS` | Reliability |
-| `MAX_FILES_PER_REQUEST`, `MAX_FILE_SIZE_MB`, `MAX_CONCURRENT_REQUESTS` | Limits |
-| `ALLOWED_FILE_HOSTS` | Hosts `/match` may download from (default `*.blob.core.windows.net`) |
-| `LOCAL_FILES_DIR` | Local testing only; ignored unless `APP_ENV=local` |
+| `gemini_model` | OCR model name (required; per-environment file) |
+| `azure_blob_base_url` | Blob container for cheque files (originals read, processed images written) |
+| `azure_sas_expiry_hours` | Add a read-only SAS token to returned URLs (0 = plain URL) |
+| `cors_origins`, `docs_enabled`, `log_level` | Per-environment app behaviour |
+| `local_files_dir` | Local testing only; ignored unless `APP_ENV=local` |
+| `max_files_per_request`, `max_file_size_mb`, `max_concurrent_requests` | Limits |
+| `allowed_file_hosts` | Hosts `/match` may download from (default `*.blob.core.windows.net`) |
+| `gemini_temperature`, `gemini_top_p`, `gemini_top_k`, `gemini_thinking_*` | Sampling / reasoning |
+| `image_processing_enabled`, `crop_padding_percent`, `pdf_render_dpi` | Crop / rotation |
+
+### Authentication
+
+`/cheques/extract` and `/cheques/match` require an **`X-API-Key`** header matching one of
+`API_KEYS` in `.env` (comma-separated, so keys can be rotated without downtime).
+A missing or wrong key returns `401 {"error": "Invalid or missing API key."}`.
+`API_KEYS` is required when `APP_ENV` is `uat` or `prod`; `/health` stays open.
+
+Generate a key:
+```powershell
+python -c "import secrets; print(secrets.token_urlsafe(32))"
+```
 
 ---
 
 ## API
 
-All errors return `{"error": "<message>"}` with status 400 / 422 / 500.
+All errors return `{"error": "<message>"}` with status 400 / 401 / 422 / 500.
 Internal details (model errors, token usage, timings) are written to logs only.
 
 ### `GET /api/v1/health`
@@ -163,6 +192,23 @@ Response — the payment list with three keys filled (other keys are returned un
 | Both differ | `Amount and date don't match. Cheque shows 5,000 dated 01-10-2026.` |
 
 An empty `payments` or `file_urls` list returns `400`.
+
+#### Cropping and rotation
+
+For each file the OCR model also reports where every cheque is (bounding box), which
+page it is on, how far it must be rotated, and whether the image needs cropping.
+A processed image is created when **a file holds several cheques**, or the model reports
+the cheque **needs cropping or rotation**. OpenCV then crops and straightens each cheque
+and saves it next to the original:
+
+```
+.../OCR/Temp/<guid>.jpeg  ->  .../OCR/Temp/<guid>_processed_1.jpeg, _processed_2.jpeg, ...
+```
+
+`MatchedOcrFile` returns the processed image of that cheque, or the original URL when
+no processing was needed (or it failed). Files under `azure_blob_base_url` are read and
+written with `AZURE_STORAGE_CONNECTION_STRING`; other URLs are only read. In local
+testing, processed images are written into `local_files_dir`.
 
 ---
 

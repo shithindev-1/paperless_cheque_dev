@@ -36,6 +36,8 @@ class FileResult(BaseModel):
     error_detail: Optional[str] = Field(None, exclude=True)
     usage: Optional[TokenUsage] = Field(None, exclude=True)
     processing_time_ms: Optional[int] = Field(None, exclude=True)
+    # Per-cheque file URL (cropped / rotated image, or the original); parallel to `cheques`
+    cheque_files: list[str] = Field(default_factory=list, exclude=True)
 
     @model_serializer(mode="wrap")
     def _omit_empty_error(self, handler):
@@ -51,6 +53,7 @@ class FileResult(BaseModel):
             "error_detail": self.error_detail,
             "usage": self.usage.model_dump() if self.usage else None,
             "processing_time_ms": self.processing_time_ms,
+            "cheque_files": [f.split("?")[0] for f in self.cheque_files],
         }
 
 

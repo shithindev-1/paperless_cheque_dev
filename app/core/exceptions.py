@@ -17,6 +17,11 @@ class AppError(Exception):
         super().__init__(self.message)
 
 
+class AuthenticationError(AppError):
+    status_code = 401
+    message = "Invalid or missing API key."
+
+
 class InvalidRequestError(AppError):
     status_code = 400
     message = "Invalid request."

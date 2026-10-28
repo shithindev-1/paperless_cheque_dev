@@ -13,6 +13,7 @@ from app.core.exceptions import AppError, InvalidRequestError
 from app.core.logging import log_result
 from app.schemas import FileResult, MatchRequest, RentPayment, TokenUsage
 from app.services.cheque_extractor import ChequeExtractor
+from app.services.cheque_imaging import attach_cheque_files
 from app.services.file_loader import file_name_from_source, load_file, redact
 from app.services.payment_matcher import match_payments
 from app.utils.files import UploadedFile
@@ -58,6 +59,12 @@ async def _extract_all(
     extracted = await extractor.extract_many([f for _, f in to_extract])
     for (i, _), result in zip(to_extract, extracted):
         results[i] = result
+
+    # Crop / rotate where needed; each cheque then carries its own file URL
+    await asyncio.gather(*(
+        attach_cheque_files(sources[i], f, results[i], settings, request_id)
+        for i, f in to_extract if results[i].status == "success"
+    ))
     return results
 
 

@@ -37,13 +37,24 @@ def _fmt_date(value: Optional[date]) -> str:
     return value.strftime("%d-%m-%Y") if value else "unreadable"
 
 
+def _cheque_file(result: FileResult, index: int, source: str) -> str:
+    """Processed (cropped / rotated) file for this cheque if there is one, else the source."""
+    if index < len(result.cheque_files):
+        return result.cheque_files[index]
+    return source
+
+
 def match_payments(payments: list[RentPayment], files: list[tuple[str, FileResult]]) -> None:
     """Fill MatchedWithOcr / MatchedOcrFile / OcrResponse on each payment, in place.
 
     A cheque matches a payment when its amount and date equal Amount and DueDate.
     Each cheque is used for at most one payment.
     """
-    candidates = [_Candidate(url, c) for url, result in files for c in result.cheques]
+    candidates = [
+        _Candidate(_cheque_file(result, i, url), c)
+        for url, result in files
+        for i, c in enumerate(result.cheques)
+    ]
 
     for payment in payments:
         due = payment.due_date
