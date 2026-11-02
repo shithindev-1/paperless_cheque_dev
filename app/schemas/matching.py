@@ -21,6 +21,10 @@ class RentPayment(BaseModel):
     DueDate: str = Field(
         ..., description="Any common format, e.g. 2026-11-05T00:00:00, 05/11/2026, 5 Nov 2026"
     )
+    # Optional: checked against the cheque only when a value is sent
+    ChequepayeeName: Optional[str] = Field(None, description="Expected 'Pay to' name")
+    ChequeHolderName: Optional[str] = Field(None, description="Expected account holder name")
+    ChequeHolderIBAN: Optional[str] = Field(None, description="Expected account holder IBAN")
 
     # Filled by the API; any value sent in the request is ignored
     MatchedWithOcr: Optional[bool] = None

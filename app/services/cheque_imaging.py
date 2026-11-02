@@ -38,7 +38,7 @@ async def attach_cheque_files(
     if only is not None and not only:
         return
 
-    save = _saver(source, settings, len(cheques))
+    save = _saver(source, settings, len(cheques), request_id)
     if save is None:
         logger.info("[%s] %s needs crop/rotation but has no writable location; keeping original",
                     request_id, redact(source))
@@ -63,16 +63,29 @@ async def attach_cheque_files(
                              request_id, i, redact(source))
 
 
-def processed_name(name: str, suffix: str, index: int, total: int) -> str:
-    """'dir/abc.jpeg' -> 'dir/abc_ocr.pdf'; several cheques -> 'dir/abc_ocr_1.pdf', ... (always .pdf)."""
+def processed_name(
+    name: str, suffix: str, index: int, total: int,
+    folder: Optional[str] = None, request_id: Optional[str] = None,
+) -> str:
+    """Name of a processed cheque (always .pdf).
+
+    No folder:   'dir/abc.jpeg' -> 'dir/abc_ocr.pdf' (several cheques: 'dir/abc_ocr_1.pdf', ...)
+    With folder: 'dir/abc.jpeg' -> '<folder>/<request_id>/abc_ocr.pdf'
+    """
     path = PurePosixPath(name)
     number = f"_{index}" if total > 1 else ""
-    return str(path.with_name(f"{path.stem}{suffix}{number}.pdf"))
+    file_name = f"{path.stem}{suffix}{number}.pdf"
+    if folder:
+        return str(PurePosixPath(folder.strip("/")) / request_id / file_name)
+    return str(path.with_name(file_name))
 
 
-def _saver(source: str, settings: Settings, total: int):
+def _saver(source: str, settings: Settings, total: int, request_id: str):
     """Async `save(index, pdf_bytes) -> url_or_path` for this source, or None if not writable."""
-    suffix = settings.processed_file_suffix
+    def name_for(original: str, index: int) -> str:
+        return processed_name(original, settings.processed_file_suffix, index, total,
+                              settings.processed_folder, request_id)
+
     if is_url(source):
         storage = get_blob_storage(settings)
         blob_name: Optional[str] = storage.blob_name(source) if storage else None
@@ -80,7 +93,7 @@ def _saver(source: str, settings: Settings, total: int):
             return None
 
         async def save_blob(index: int, data: bytes) -> str:
-            return await storage.upload(processed_name(blob_name, suffix, index, total), data, _PDF)
+            return await storage.upload(name_for(blob_name, index), data, _PDF)
         return save_blob
 
     if not settings.local_files_enabled:
@@ -88,10 +101,11 @@ def _saver(source: str, settings: Settings, total: int):
     base = Path(settings.local_files_dir).resolve()
 
     async def save_local(index: int, data: bytes) -> str:
-        name = processed_name(Path(source).as_posix(), suffix, index, total)
+        name = name_for(Path(source).as_posix(), index)
         target = (base / name).resolve()
         if not target.is_relative_to(base):
             raise ValueError("Processed file path escapes LOCAL_FILES_DIR")
+        target.parent.mkdir(parents=True, exist_ok=True)
         await asyncio.to_thread(target.write_bytes, data)
         return name
     return save_local

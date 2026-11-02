@@ -34,7 +34,7 @@ async def match_cheques(
             f"Too many files. Send at most {settings.max_files_per_request} file URLs per request."
         )
 
-    request_id = uuid.uuid4().hex[:12]
+    request_id = uuid.uuid4().hex  # full GUID: also names the cropped-files folder
     start = time.perf_counter()
     sources, payments = request.file_urls, request.payments
     logger.info("[%s] Match request: %d file(s), %d payment(s), model=%s",

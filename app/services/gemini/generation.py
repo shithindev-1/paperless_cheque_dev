@@ -67,7 +67,8 @@ async def generate_structured(
 ) -> tuple[T, TokenUsage]:
     """Call Gemini, parse the JSON response into `response_model`, and return token usage.
 
-    Retries with exponential backoff on rate limits and transient server errors.
+    Retries with exponential backoff on rate limits and transient server errors, and
+    immediately when the model returns cut-off or invalid JSON (e.g. a repetition loop).
     """
     attempt = 0
     while True:
@@ -90,4 +91,11 @@ async def generate_structured(
             logger.warning("Gemini error %s, retrying in %ss (attempt %s/%s)",
                            exc.code, delay, attempt + 1, max_retries)
             await asyncio.sleep(delay)
+            attempt += 1
+
+        except ValueError as exc:  # pydantic ValidationError included: empty / cut-off / bad JSON
+            if attempt >= max_retries:
+                raise
+            logger.warning("Invalid model output (%s), retrying (attempt %s/%s)",
+                           str(exc).splitlines()[0][:200], attempt + 1, max_retries)
             attempt += 1

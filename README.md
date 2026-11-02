@@ -103,6 +103,7 @@ changing `APP_ENV`, the matching `settings.<env>.json` and the secrets in `.env`
 | `allowed_file_hosts` | Hosts `/match` may download from (default `*.blob.core.windows.net`) |
 | `gemini_temperature`, `gemini_top_p`, `gemini_top_k`, `gemini_thinking_*` | Sampling / reasoning |
 | `image_processing_enabled`, `crop_padding_percent`, `pdf_render_dpi` | Crop / rotation |
+| `processed_folder` | Folder for cropped cheques (`<folder>/<request id>/`); empty = next to the original |
 
 ### Authentication
 
@@ -192,6 +193,44 @@ Response — the payment list with three keys filled (other keys are returned un
 | Amount differs | `Amount doesn't match. Cheque amount is 5,000.` |
 | Both differ | `Amount and date don't match. Cheque shows 5,000 dated 01-10-2026.` |
 
+Optional per payment: `ChequepayeeName`, `ChequeHolderName`, `ChequeHolderIBAN`. When a value
+is sent it must also match the cheque (names: case and extra spaces ignored, nothing else;
+IBAN: spaces ignored). Empty or missing values are not checked.
+
+| Case | `OcrResponse` (added to any amount / date reason) |
+|---|---|
+| Name differs | `Payee name doesn't match. Cheque shows ABC LLC.` |
+| Not on the cheque | `IBAN not found on the cheque.` |
+
+#### Cheque checks
+
+Every cheque is also checked on its own; any problem makes the payment unmatched and is
+listed in `OcrResponse` (and in the cheque's `error` / `issues` on `/extract`).
+SIGNATURE_MISSING, AMOUNT_MISMATCH and DAMAGED are always listed first, before any
+amount / date / name reason:
+
+| Code | `OcrResponse` text |
+|---|---|
+| ALTERATION | `Overwriting or strike-through found on the <field>. UAE banks do not accept altered cheques. Please provide a new cheque.` — any strike-through, overwritten character or correction, even if initialled |
+| AMOUNT_MISMATCH | `Amount in words (Five Thousand) does not match figures (8,000).` — decided by the backend from both values |
+| AMOUNT_MISSING | `Amount in words or figures is missing.` |
+| DATE_ISSUE | `Cheque date is not valid (<reason>).` — stale (> 6 months old) is decided by the backend; post-dated is fine |
+| PAYEE_ISSUE | `Payee name is missing or overwritten.` |
+| SIGNATURE_MISSING | `Signature missing.` |
+| MIXED_LANGUAGE | `Cheque is filled in a mix of English and Arabic.` |
+| DAMAGED | `Cheque appears damaged near the MICR line.` (location from the OCR) |
+| ILLEGIBLE | `Handwriting is not clear.` |
+| IMAGE_INCOMPLETE | `Cheque image is incomplete or blurred.` |
+
+Fields that are present but unreadable are never guessed or compared:
+`Payee name is not clearly visible.` Unclear fields, ILLEGIBLE, IMAGE_INCOMPLETE and DAMAGED
+add `Please upload a clear copy.` Holder name / IBAN are only considered when sent.
+
+Messages stay short: a cut-off, blurred or illegible cheque (IMAGE_INCOMPLETE / ILLEGIBLE,
+or a page below `min_image_sharpness`) returns only
+`Cheque image is incomplete or unclear. Please upload a clear, full copy.` — nothing is
+compared or derived from it. Model details longer than 45 characters are left out.
+
 An empty `payments` or `file_urls` list returns `400`.
 
 #### Cropping and rotation
@@ -200,12 +239,15 @@ For each file the OCR model also reports where every cheque is (bounding box), w
 page it is on, how far it must be rotated, and whether the image needs cropping.
 Only **matched** cheques are processed. A processed image is created when **a file holds several cheques**, or the model reports
 the cheque **needs cropping or rotation**. OpenCV then crops and straightens each cheque
-and saves it as a one-page PDF next to the original:
+and saves it as a one-page PDF. With `processed_folder` set, every request gets its own
+folder (named by the request id, so nothing is overwritten):
 
 ```
-One cheque in the file:     .../OCR/Temp/<guid>.jpeg  ->  .../OCR/Temp/<guid>_ocr.pdf
-Several cheques in the file: .../OCR/Temp/<guid>.pdf   ->  .../OCR/Temp/<guid>_ocr_1.pdf, <guid>_ocr_2.pdf, ...
+One cheque in the file:      .../<processed_folder>/<request-id>/<name>_ocr.pdf
+Several cheques in the file: .../<processed_folder>/<request-id>/<name>_ocr_1.pdf, <name>_ocr_2.pdf, ...
 ```
+
+With `processed_folder` empty, the PDF is saved next to the original (`.../<name>_ocr.pdf`).
 
 `MatchedOcrFileURL` always returns the original file URL. `CroppedOCRFileURL` returns the
 processed image of that cheque, or `null` when no processing was needed (or it failed). Files under `azure_blob_base_url` are read and

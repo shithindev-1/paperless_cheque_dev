@@ -15,6 +15,7 @@ from app.schemas import ChequeOcr
 
 _SCALE = 1000
 _MIN_TILT_DEGREES = 1.0  # smaller tilts are left alone
+_MAX_MEASURED_TILT = 20.0  # lines steeper than this are not cheque edges / printed lines
 _WHITE = (255, 255, 255)
 
 
@@ -90,6 +91,14 @@ def rotate(image: np.ndarray, degrees_clockwise: Optional[float]) -> np.ndarray:
                           flags=cv2.INTER_CUBIC, borderValue=_WHITE)
 
 
+def sharpness(image: np.ndarray) -> float:
+    """Variance of the Laplacian at a fixed 1000 px width; low = blurred or low resolution."""
+    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    h, w = gray.shape
+    gray = cv2.resize(gray, (1000, max(1, round(h * 1000 / w))), interpolation=cv2.INTER_AREA)
+    return float(cv2.Laplacian(gray, cv2.CV_64F).var())
+
+
 def encode_jpeg(image: np.ndarray, quality: int) -> bytes:
     ok, buffer = cv2.imencode(".jpg", image, [cv2.IMWRITE_JPEG_QUALITY, quality])
     if not ok:
@@ -110,10 +119,66 @@ def process_cheque(
     data: bytes, mime_type: str, cheque: ChequeOcr,
     *, padding_percent: float, dpi: int, quality: int,
 ) -> bytes:
-    """Return the cropped, upright cheque as a one-page PDF."""
+    """Return the cropped, upright, straightened cheque as a one-page PDF.
+
+    The quarter turn comes from the model (which way the text points); the fine tilt is
+    measured from the image's straight lines, falling back to the model's estimate.
+    """
     page = load_page(data, mime_type, cheque.page or 1, dpi)
-    return encode_pdf(rotate(crop(page, cheque.bounding_box, padding_percent),
-                             cheque.rotation_degrees), quality, dpi)
+    image = rotate(crop(page, cheque.bounding_box, padding_percent), cheque.quarter_turn)
+    measured = measure_tilt(image)
+    tilt = -measured if measured is not None else (cheque.tilt_degrees or 0.0)
+    if abs(tilt) < _MIN_TILT_DEGREES:
+        return encode_pdf(image, quality, dpi)
+    return encode_pdf(_trim_to_cheque(rotate(image, tilt), image.shape, tilt), quality, dpi)
+
+
+def _trim_to_cheque(rotated: np.ndarray, box_shape: tuple, tilt: float) -> np.ndarray:
+    """After straightening, cut away the background corners that the crop box contained.
+
+    A tilted w x h cheque fills a W x H box with W = w*cos + h*sin, H = w*sin + h*cos;
+    solving for w, h gives the straight cheque, centred in the rotated image.
+    """
+    big_h, big_w = box_shape[:2]
+    c, s = abs(np.cos(np.radians(tilt))), abs(np.sin(np.radians(tilt)))
+    denom = c * c - s * s
+    w = int((big_w * c - big_h * s) / denom)
+    h = int((big_h * c - big_w * s) / denom)
+    if w < 10 or h < 10:
+        return rotated
+    rh, rw = rotated.shape[:2]
+    top, left = max(0, (rh - h) // 2), max(0, (rw - w) // 2)
+    return rotated[top:top + h, left:left + w]
+
+
+def measure_tilt(image: np.ndarray) -> Optional[float]:
+    """Angle of the long near-horizontal lines (cheque edges, printed lines) in degrees.
+
+    Positive = the content slopes down to the right (rotated clockwise). None when there
+    are too few lines to be sure.
+    """
+    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    h, w = gray.shape
+    gray = cv2.resize(gray, (1000, max(1, round(h * 1000 / w))), interpolation=cv2.INTER_AREA)
+    edges = cv2.Canny(gray, 50, 150)
+    lines = cv2.HoughLinesP(edges, 1, np.pi / 720, threshold=80, minLineLength=250, maxLineGap=10)
+    if lines is None:
+        return None
+    angles, weights = [], []
+    for x1, y1, x2, y2 in lines.reshape(-1, 4):
+        angle = float(np.degrees(np.arctan2(y2 - y1, x2 - x1)))
+        if angle > 90:
+            angle -= 180
+        elif angle < -90:
+            angle += 180
+        if abs(angle) <= _MAX_MEASURED_TILT:
+            angles.append(angle)
+            weights.append(np.hypot(x2 - x1, y2 - y1))
+    if len(angles) < 2:
+        return None
+    order = np.argsort(angles)  # length-weighted median: robust to a few stray lines
+    cumulative = np.cumsum(np.array(weights)[order])
+    return float(np.array(angles)[order][np.searchsorted(cumulative, cumulative[-1] / 2)])
 
 
 def _normalise(degrees: Optional[float]) -> float:

@@ -24,10 +24,24 @@ def _result(*cheques) -> FileResult:
 def test_processed_name():
     assert processed_name("App/OCR/Temp/abc.jpeg", "_ocr", 1, 1) == "App/OCR/Temp/abc_ocr.pdf"
     assert processed_name("cheque_1.pdf", "_ocr", 2, 3) == "cheque_1_ocr_2.pdf"
+    assert (processed_name("App/FileMatchOCR/1/g/abc.jpg", "_ocr", 1, 1, "/App/ChequeMatchOcr/Cropped/", "r1")
+            == "App/ChequeMatchOcr/Cropped/r1/abc_ocr.pdf")
+
+
+async def test_processed_folder_groups_files_by_request(settings, tmp_path):
+    settings.processed_folder = "Cropped"
+    result = _result(
+        ChequeOcr(page=1, bounding_box=[0, 0, 500, 1000], needs_crop=True),
+        ChequeOcr(page=1, bounding_box=[500, 0, 1000, 1000], needs_crop=True),
+    )
+    await attach_cheque_files("c.jpeg", UploadedFile("c.jpeg", _jpeg(), "image/jpeg"),
+                              result, settings, "req1")
+    assert result.cheque_files == ["Cropped/req1/c_ocr_1.pdf", "Cropped/req1/c_ocr_2.pdf"]
+    assert (tmp_path / "Cropped" / "req1" / "c_ocr_2.pdf").read_bytes().startswith(b"%PDF")
 
 
 async def test_no_processing_keeps_original(settings):
-    result = _result(ChequeOcr(rotation_degrees=0, needs_crop=False))
+    result = _result(ChequeOcr(text_top="up", needs_crop=False))
     await attach_cheque_files("c.jpeg", UploadedFile("c.jpeg", _jpeg(), "image/jpeg"),
                               result, settings, "t")
     assert result.cheque_files == ["c.jpeg"]
@@ -35,8 +49,8 @@ async def test_no_processing_keeps_original(settings):
 
 async def test_local_processing_writes_next_to_original(settings, tmp_path):
     result = _result(
-        ChequeOcr(page=1, bounding_box=[0, 0, 500, 1000], rotation_degrees=0, needs_crop=True),
-        ChequeOcr(page=1, bounding_box=[500, 0, 1000, 1000], rotation_degrees=180, needs_crop=True),
+        ChequeOcr(page=1, bounding_box=[0, 0, 500, 1000], text_top="up", needs_crop=True),
+        ChequeOcr(page=1, bounding_box=[500, 0, 1000, 1000], text_top="down", needs_crop=True),
     )
     await attach_cheque_files("c.jpeg", UploadedFile("c.jpeg", _jpeg(), "image/jpeg"),
                               result, settings, "t")

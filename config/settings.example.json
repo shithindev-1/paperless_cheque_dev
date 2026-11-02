@@ -16,6 +16,11 @@
     "azure_sas_expiry_hours": 0
   },
 
+  "image_processing": {
+    "_comment": "Cropped cheques go to <processed_folder>/<request id>/. null = next to the original file.",
+    "processed_folder": "ApplicationFiles/<folder>/Cropped"
+  },
+
   "file_urls": {
     "_comment": "Local testing only (APP_ENV=local): folder whose files can be referenced by name.",
     "local_files_dir": null
