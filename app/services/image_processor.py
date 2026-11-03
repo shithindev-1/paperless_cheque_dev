@@ -124,13 +124,27 @@ def process_cheque(
     The quarter turn comes from the model (which way the text points); the fine tilt is
     measured from the image's straight lines, falling back to the model's estimate.
     """
+    return process_cheque_detailed(data, mime_type, cheque, padding_percent=padding_percent,
+                                   dpi=dpi, quality=quality)[0]
+
+
+def process_cheque_detailed(
+    data: bytes, mime_type: str, cheque: ChequeOcr,
+    *, padding_percent: float, dpi: int, quality: int,
+) -> tuple[bytes, dict]:
+    """process_cheque, plus what was done (for the request log)."""
     page = load_page(data, mime_type, cheque.page or 1, dpi)
     image = rotate(crop(page, cheque.bounding_box, padding_percent), cheque.quarter_turn)
     measured = measure_tilt(image)
     tilt = -measured if measured is not None else (cheque.tilt_degrees or 0.0)
-    if abs(tilt) < _MIN_TILT_DEGREES:
-        return encode_pdf(image, quality, dpi)
-    return encode_pdf(_trim_to_cheque(rotate(image, tilt), image.shape, tilt), quality, dpi)
+    if abs(tilt) >= _MIN_TILT_DEGREES:
+        image = _trim_to_cheque(rotate(image, tilt), image.shape, tilt)
+    else:
+        tilt = 0.0
+    info = {"quarter_turn": cheque.quarter_turn,
+            "tilt_measured": round(measured, 2) if measured is not None else None,
+            "tilt_applied": round(tilt, 2), "output_px": [image.shape[1], image.shape[0]]}
+    return encode_pdf(image, quality, dpi), info
 
 
 def _trim_to_cheque(rotated: np.ndarray, box_shape: tuple, tilt: float) -> np.ndarray:

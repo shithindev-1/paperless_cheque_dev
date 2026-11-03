@@ -1,7 +1,7 @@
 """File type detection and validation (no I/O)."""
 
 import mimetypes
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Optional
 
 from fastapi import UploadFile
@@ -22,6 +22,8 @@ class UploadedFile:
     name: str
     data: bytes
     mime_type: str
+    # This file's entry in the request trace (filled in place; see app.core.tracing)
+    trace: dict = field(default_factory=dict, compare=False, repr=False)
 
 
 def sniff_mime_type(data: bytes) -> Optional[str]:

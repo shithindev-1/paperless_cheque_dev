@@ -4,6 +4,8 @@ import re
 from datetime import date, datetime, timezone
 from typing import Optional
 
+from app.utils.arabic import western_digits
+
 # Tried in order. Day-first (UAE) wins for ambiguous dates like 05/11/2026;
 # month-first is only used when day-first is impossible (e.g. 11/25/2026).
 _FORMATS = (
@@ -33,7 +35,7 @@ def parse_date(value) -> Optional[date]:
     if isinstance(value, date):
         return value
 
-    text = str(value).strip()
+    text = western_digits(str(value)).strip()  # Arabic cheques: ١٠/١١/٢٠٢٦
     if not text:
         return None
 

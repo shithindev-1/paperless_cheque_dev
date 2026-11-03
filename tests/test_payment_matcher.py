@@ -138,12 +138,18 @@ def test_names_and_iban_match_ignoring_case_and_spaces():
     assert payments[0].MatchedWithOcr is True
 
 
-def test_name_mismatch_is_strict_and_reported():
-    payments = [_named_payment(ChequepayeeName="ABC L.L.C.", ChequeHolderIBAN="AE07")]
-    match_payments(payments, [_named_file(payee_name="ABC LLC")])
+def test_names_ignore_punctuation():
+    payments = [_named_payment(ChequepayeeName="ABC L.L.C.", ChequeHolderName="MS SARA KHAN")]
+    match_payments(payments, [_named_file(payee_name="ABC LLC", holder_name="MS. SARA KHAN")])
+    assert payments[0].OcrResponse == MATCHED
+
+
+def test_name_letter_difference_is_reported():
+    payments = [_named_payment(ChequepayeeName="Omar Khalid Ahmed", ChequeHolderIBAN="AE07")]
+    match_payments(payments, [_named_file(payee_name="Omar Khalid Ahmad")])
     assert payments[0].MatchedWithOcr is False
     assert payments[0].MatchedOcrFileURL == "n.pdf"
-    assert payments[0].OcrResponse == ("Payee name doesn't match. Cheque shows ABC LLC. "
+    assert payments[0].OcrResponse == ("Payee name doesn't match. Cheque shows Omar Khalid Ahmad. "
                                        "IBAN not found on the cheque.")
 
 
@@ -152,6 +158,102 @@ def test_name_mismatch_added_to_date_mismatch():
     match_payments(payments, [_named_file(holder_name="Y")])
     assert payments[0].OcrResponse == ("Date doesn't match. Cheque date is 05-11-2026. "
                                        "Holder name doesn't match. Cheque shows Y.")
+
+
+def _arabic_named_file(**fields) -> tuple[str, FileResult]:
+    from app.schemas import ChequeOcr
+
+    cheque = ChequeOcr(**{"cheque_amount": 8400, "cheque_date": "05-11-2026",
+                          "amount_in_words": "Eight Thousand Four Hundred Only", **fields})
+    return "n.pdf", FileResult(file_name="n.pdf", status="success", cheques=[cheque])
+
+
+def test_english_name_matches_arabic_cheque_despite_spelling():
+    payments = [_named_payment(ChequeHolderName="Mohammed Aly Hasan", ChequepayeeName="Fatimah Ahmad")]
+    match_payments(payments, [_arabic_named_file(
+        holder_name="محمد علي حسن", holder_name_latin="Mohamed Ali Hassan",
+        payee_name="فاطمة أحمد", payee_name_latin="Fatima Ahmed")])
+    assert payments[0].OcrResponse == MATCHED
+
+
+def test_english_name_differs_from_arabic_cheque():
+    payments = [_named_payment(ChequeHolderName="Mohamed Ali Hassan Al Masri")]
+    match_payments(payments, [_arabic_named_file(
+        holder_name="محمد علي حسن المري", holder_name_latin="Mohamed Ali Hassan Al Marri")])
+    assert payments[0].MatchedWithOcr is False
+    assert payments[0].OcrResponse == ("Holder name doesn't match. Cheque shows "
+                                       "محمد علي حسن المري (Mohamed Ali Hassan Al Marri).")
+
+
+def test_english_cheque_names_stay_strict():
+    # Sound matching is only for English vs Arabic; two English spellings must still agree
+    payments = [_named_payment(ChequepayeeName="Omar Khalid Ahmed")]
+    match_payments(payments, [_arabic_named_file(payee_name="Omar Khalid Ahmad")])
+    assert payments[0].MatchedWithOcr is False
+
+
+def test_arabic_holder_name_matches_arabic_printed_beside_english():
+    payments = [_named_payment(ChequeHolderName="Omar Ali", ChequeHolderNameAr="عمر  علي")]
+    match_payments(payments, [_arabic_named_file(holder_name="OMAR ALI", holder_name_ar="عمر علي")])
+    assert payments[0].OcrResponse == MATCHED
+
+
+def test_arabic_holder_name_matches_arabic_only_cheque():
+    payments = [_named_payment(ChequeHolderNameAr="عمر علي")]
+    match_payments(payments, [_arabic_named_file(holder_name="عمر علي", holder_name_latin="Omar Ali")])
+    assert payments[0].OcrResponse == MATCHED
+
+
+def test_arabic_holder_name_mismatch():
+    payments = [_named_payment(ChequeHolderNameAr="عمر حسن")]
+    match_payments(payments, [_arabic_named_file(holder_name="OMAR ALI", holder_name_ar="عمر علي")])
+    assert payments[0].OcrResponse == "Arabic holder name doesn't match. Cheque shows OMAR ALI / عمر علي."
+
+
+def test_arabic_name_sent_for_english_only_cheque_compared_by_sound():
+    payments = [_named_payment(ChequeHolderNameAr="عمر علي", ChequepayeeName="خالد عبدالله")]
+    match_payments(payments, [_arabic_named_file(holder_name="OMAR ALI", payee_name="Khalid Abdulla")])
+    assert payments[0].OcrResponse == MATCHED
+
+    payments = [_named_payment(ChequeHolderNameAr="عمر حسن")]
+    match_payments(payments, [_arabic_named_file(holder_name="OMAR ALI")])
+    assert payments[0].OcrResponse == "Arabic holder name doesn't match. Cheque shows OMAR ALI."
+
+
+def test_english_name_stays_strict_when_cheque_also_prints_english():
+    # Arabic is printed too, but the English name on the cheque decides: Aly != Ali
+    payments = [_named_payment(ChequeHolderName="Omar Aly")]
+    match_payments(payments, [_arabic_named_file(holder_name="OMAR ALI", holder_name_ar="عمر علي")])
+    assert payments[0].MatchedWithOcr is False
+
+
+def test_english_name_matches_arabic_only_cheque_without_ocr_spelling():
+    # The backend's own spelling of the Arabic name is used when the OCR gives none
+    payments = [_named_payment(ChequeHolderName="Ibrahim Saleh Al Marri")]
+    match_payments(payments, [_arabic_named_file(holder_name="إبراهيم صالح المري")])
+    assert payments[0].OcrResponse == MATCHED
+
+
+def test_arabic_digits_on_cheque_and_in_request():
+    payments = [RentPayment(Amount=6250, DueDate="١٠/١١/٢٠٢٦", ChequeHolderIBAN="AE07 0331 2345 6789 0123 456")]
+    match_payments(payments, [_arabic_named_file(cheque_amount="٦٬٢٥٠٫٠٠", cheque_date="٢٠٢٦/١١/١٠",
+                                                 amount_in_words="Six Thousand Two Hundred Fifty Only",
+                                                 iban="AE٠٧ ٠٣٣١ ٢٣٤٥ ٦٧٨٩ ٠١٢٣ ٤٥٦")])
+    assert payments[0].OcrResponse == MATCHED
+
+
+def test_unclear_holder_reported_once_for_both_keys():
+    payments = [_named_payment(ChequeHolderName="Omar Ali", ChequeHolderNameAr="عمر علي")]
+    match_payments(payments, [_arabic_named_file(holder_name="OMAR ALI", holder_name_ar="عمر علي",
+                                                 unclear_fields=["holder_name"])])
+    assert payments[0].OcrResponse == "Holder name is not clearly visible. Please upload a clear copy."
+
+
+def test_unclear_arabic_name_drops_its_english_spelling():
+    from app.schemas import ChequeOcr
+
+    cheque = ChequeOcr(holder_name="محمد", holder_name_latin="Mohamed", unclear_fields=["holder_name"])
+    assert cheque.holder_name is None and cheque.holder_name_latin is None
 
 
 def test_unclear_field_is_not_compared_and_asks_for_clear_copy():
@@ -166,7 +268,7 @@ def test_unclear_amount_and_date():
     payments = [_named_payment()]
     match_payments(payments, [_named_file(cheque_amount=None, cheque_date=None,
                                           unclear_fields=["cheque_amount", "cheque_date"])])
-    assert payments[0].OcrResponse == ("Amount and date are not clearly visible. "
+    assert payments[0].OcrResponse == ("Amount in figures and date are not clearly visible. "
                                        "Please upload a clear copy.")
 
 
@@ -177,7 +279,7 @@ def _ocr_cheque(**fields):
     from app.schemas import ChequeOcr
 
     base = {"cheque_amount": 8400, "cheque_date": now_uae().strftime("%d-%m-%Y"),
-            "amount_in_words": "Eight Thousand Four Hundred Only", "amount_in_words_value": 8400}
+            "amount_in_words": "Eight Thousand Four Hundred Only"}
     return ChequeOcr(**{**base, **fields})
 
 
@@ -194,7 +296,7 @@ def test_clean_cheque_matches():
 
 
 def test_words_must_agree_with_figures():
-    cheque = _ocr_cheque(amount_in_words="Eight Thousand Only", amount_in_words_value=8000)
+    cheque = _ocr_cheque(amount_in_words="Eight Thousand Only")
     expected = "Amount in words (Eight Thousand Only) does not match figures (8,400)."
     assert cheque.error == expected
     payment = _match_one(cheque)
@@ -207,10 +309,48 @@ def test_model_amount_mismatch_ignored_when_numbers_agree():
     assert _match_one(cheque).OcrResponse == MATCHED
 
 
-def test_stale_cheque_is_rejected():
-    cheque = _ocr_cheque(cheque_date="01-01-2020")
-    assert _match_one(cheque).OcrResponse == ("Cheque date is not valid "
-                                              "(dated 01-01-2020, more than 6 months old).")
+def test_old_date_is_judged_only_by_due_date():
+    # No separate stale-cheque check: an old cheque matches if DueDate agrees...
+    cheque = _ocr_cheque(cheque_date="01-01-2020", issues=[{"code": "DATE_ISSUE", "detail": "stale"}])
+    assert _match_one(cheque).OcrResponse == MATCHED
+    # ...and a wrong date is reported by the comparison only
+    payment = RentPayment(Amount=8400, DueDate="2026-01-01")
+    match_payments([payment], [("n.pdf", FileResult(file_name="n.pdf", status="success",
+                                                    cheques=[_ocr_cheque(cheque_date="01-01-2020")]))])
+    assert payment.OcrResponse == "Date doesn't match. Cheque date is 01-01-2020."
+
+
+def test_missing_date_is_still_reported():
+    assert "Cheque date is not valid (date missing)." in _match_one(_ocr_cheque(cheque_date=None)).OcrResponse
+
+
+def test_doubtful_year_is_named_and_date_not_guessed():
+    # The model read 2024 but was not sure (2024 or 2026): no date is kept or compared
+    cheque = _ocr_cheque(cheque_date="27-09-2024", unclear_fields=["date_year"])
+    assert cheque.cheque_date is None
+    payment = RentPayment(Amount=8400, DueDate="2026-09-27")
+    match_payments([payment], [("n.pdf", FileResult(file_name="n.pdf", status="success", cheques=[cheque]))])
+    assert payment.MatchedWithOcr is False
+    assert payment.OcrResponse == ("Year of the cheque date is not clearly visible. "
+                                   "Please upload a clear copy.")
+
+
+def test_doubtful_date_parts_combined_with_other_fields():
+    cheque = _ocr_cheque(cheque_date=None, payee_name=None,
+                         unclear_fields=["date_day", "payee_name", "date_month"])
+    assert cheque.error == ("Day and month of the cheque date and payee name are not clearly visible. "
+                            "Please upload a clear copy.")
+
+
+def test_whole_date_unclear_covers_its_parts():
+    cheque = _ocr_cheque(cheque_date=None, unclear_fields=["date_year", "cheque_date"])
+    assert cheque.error == "Date is not clearly visible. Please upload a clear copy."
+
+
+def test_payee_missing_not_repeated_when_payee_sent():
+    cheque = _ocr_cheque(payee_name=None, issues=[{"code": "PAYEE_ISSUE"}])
+    assert _match_one(cheque).OcrResponse == "Payee name is missing."
+    assert _match_one(cheque, ChequepayeeName="ABC LLC").OcrResponse == "Payee name not found on the cheque."
 
 
 def test_model_issues_reported_with_clear_copy_when_needed():
@@ -243,9 +383,13 @@ def test_cheque_issues_come_before_amount_and_date():
 
 def test_unclear_field_not_repeated_as_issue():
     cheque = _ocr_cheque(payee_name=None, unclear_fields=["payee_name"],
-                         issues=[{"code": "PAYEE_ISSUE"}, {"code": "ILLEGIBLE"}])
+                         issues=[{"code": "PAYEE_ISSUE"}])
     assert _match_one(cheque).OcrResponse == ("Payee name is not clearly visible. "
                                               "Please upload a clear copy.")
+    # an illegible cheque collapses to the one short message instead
+    illegible = _ocr_cheque(payee_name=None, unclear_fields=["payee_name"], issues=[{"code": "ILLEGIBLE"}])
+    assert _match_one(illegible).OcrResponse == ("Cheque image is incomplete or unclear. "
+                                                 "Please upload a clear, full copy.")
 
 
 def test_unclear_holder_only_matters_when_sent():

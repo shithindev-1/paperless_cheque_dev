@@ -1,17 +1,20 @@
 """Match extracted cheques against expected rent payments.
 
 A cheque matches when Amount and DueDate match, every optional field the caller sent
-(ChequepayeeName, ChequeHolderName, ChequeHolderIBAN) matches, and the cheque itself has
+(ChequepayeeName, ChequeHolderName, ChequeHolderNameAr, ChequeHolderIBAN) matches, and the cheque itself has
 no problems (alteration, words vs figures, stale date, missing signature, unclear fields, ...).
 Fields the OCR marks as unclear are never compared; the caller is asked for a clear copy.
 """
 
+import re
+import unicodedata
 from dataclasses import dataclass
 from datetime import date
 from typing import Optional
 
 from app.schemas import ChequeEntity, FileResult, RentPayment
-from app.schemas.cheque import CLEAR_COPY, CORE_FIELDS, UnclearField
+from app.schemas.cheque import CLEAR_COPY, CORE_FIELDS, IssueCode, UnclearField
+from app.utils.arabic import arabic_to_latin, western_digits
 from app.utils.dates import parse_date
 
 MATCHED = "Matched"
@@ -50,19 +53,72 @@ def _fmt_date(value: Optional[date]) -> str:
 
 
 def _norm_name(value: str) -> str:
-    """Strict: only case and repeated spaces are ignored."""
-    return " ".join(value.split()).casefold()
+    """Case, spaces and punctuation are ignored; every letter must match.
+
+    'MS. SARA KHAN' == 'ms sara khan', 'ABC L.L.C.' == 'ABC LLC',
+    'Al-Mansoori' == 'Al Mansoori'; 'Ahmad' != 'Ahmed'. Works for Arabic letters too.
+    English vs Arabic (either way round) is compared by sound instead (_names_match).
+    """
+    return "".join(ch for ch in value.casefold() if ch.isalnum())
 
 
 def _norm_iban(value: str) -> str:
-    return "".join(value.split()).upper()
+    return "".join(western_digits(value).split()).upper()
 
 
-# (request key, cheque field, label in messages, normaliser)
-_TEXT_CHECKS = (
-    ("ChequepayeeName", UnclearField.PAYEE_NAME, "Payee name", _norm_name),
-    ("ChequeHolderName", UnclearField.HOLDER_NAME, "Holder name", _norm_name),
-    ("ChequeHolderIBAN", UnclearField.IBAN, "IBAN", _norm_iban),
+def _is_latin(value: str) -> bool:
+    return all(ch.isascii() for ch in unicodedata.normalize("NFKD", value) if ch.isalpha())
+
+
+def _sound(value: str) -> str:
+    """Consonant skeleton of a name in English letters: 'Mohammed Hamdi' == 'Mohamed Hamdy' == 'mhmdhmd'.
+
+    Arabic script does not write short vowels, so English spellings of one Arabic name differ
+    mostly in vowels (Ahmed / Ahmad, Omar / Umar), doubled letters (Mohammed / Mohamed) and a
+    final h (Abdullah / Abdulla, Fatimah / Fatima).
+    """
+    text = unicodedata.normalize("NFKD", value.casefold())
+    text = "".join(ch if ch.isascii() and ch.isalpha() else " " for ch in text)
+    text = re.sub(r"h\b", "", text)
+    for a, b in (("ph", "f"), ("ck", "k"), ("q", "k"), ("c", "k")):
+        text = text.replace(a, b)
+    text = re.sub(r"[aeiouyw\s]", "", text)
+    return re.sub(r"(.)\1+", r"\1", text)
+
+
+def _same_sound(a: str, b: str) -> bool:
+    sa, sb = _sound(a), _sound(b)
+    return bool(sa) and sa == sb
+
+
+def _names_match(expected: str, shown: list[str], latin: str) -> bool:
+    """Same script: every letter must match (_norm_name). Only when the cheque has no name in the
+    sent script, English vs Arabic is compared by sound, using the OCR's English spelling of the
+    Arabic name and the backend's own spelling of it."""
+    english = _is_latin(expected)
+    same_script = [s for s in shown if _is_latin(s) == english]
+    if same_script:
+        return any(_norm_name(s) == _norm_name(expected) for s in same_script)
+    if english:  # English sent, only Arabic on the cheque
+        return any(_same_sound(expected, s)
+                   for actual in shown for s in (latin, arabic_to_latin(actual)) if s)
+    return any(_same_sound(arabic_to_latin(expected), actual) for actual in shown)  # Arabic sent
+
+
+def _shown_names(cheque: ChequeEntity, field: UnclearField) -> list[str]:
+    """Every version of the name on the cheque: the holder may be printed in English and Arabic."""
+    names = [getattr(cheque, field.value)]
+    if field == UnclearField.HOLDER_NAME:
+        names.append(getattr(cheque, "holder_name_ar", None))  # internal OCR field (ChequeOcr only)
+    return [n.strip() for n in dict.fromkeys(names) if n and n.strip()]
+
+
+# (request key, cheque field, label in messages); names may be sent in English or Arabic
+_NAME_CHECKS = (
+    ("ChequepayeeName", UnclearField.PAYEE_NAME, "Payee name"),
+    ("ChequeHolderName", UnclearField.HOLDER_NAME, "Holder name"),
+    ("ChequeHolderNameAr", UnclearField.HOLDER_NAME, "Arabic holder name"),
+    ("ChequeHolderIBAN", UnclearField.IBAN, "IBAN"),
 )
 
 
@@ -70,22 +126,34 @@ def _checks(payment: RentPayment, c: _Candidate) -> tuple[list[str], list[str], 
     """(cheque issues, name / IBAN mismatches, unclear note) for this payment and cheque."""
     mismatches: list[str] = []
     extra_unclear: list[UnclearField] = []
-    checks = () if c.cheque.unreadable else _TEXT_CHECKS  # never compare values from a bad image
-    for key, field, label, norm in checks:
+    checks = () if c.cheque.unreadable else _NAME_CHECKS  # never compare values from a bad image
+    for key, field, label in checks:
         expected = (getattr(payment, key) or "").strip()
         if not expected:
             continue
         if c.unclear(field):  # never compared; payee is already reported as a core field
-            if field not in CORE_FIELDS:
+            if field not in CORE_FIELDS and field not in extra_unclear:
                 extra_unclear.append(field)
             continue
-        actual = (getattr(c.cheque, field.value) or "").strip()
-        if not actual:
+        shown = _shown_names(c.cheque, field)
+        if not shown:
             mismatches.append(f"{label} not found on the cheque.")
-        elif norm(actual) != norm(expected):
-            mismatches.append(f"{label} doesn't match. Cheque shows {actual}.")
+            continue
+        if field == UnclearField.IBAN:
+            if _norm_iban(shown[0]) != _norm_iban(expected):
+                mismatches.append(f"{label} doesn't match. Cheque shows {shown[0]}.")
+            continue
+        # Internal OCR field (ChequeOcr only): English spelling of an Arabic name
+        latin = (getattr(c.cheque, f"{field.value}_latin", None) or "").strip()
+        if not _names_match(expected, shown, latin):
+            text = " / ".join(shown)
+            if latin and _is_latin(expected) and not any(_is_latin(s) for s in shown):
+                text += f" ({latin})"
+            mismatches.append(f"{label} doesn't match. Cheque shows {text}.")
     unclear = c.cheque.unclear(tuple(extra_unclear))
-    return c.cheque.issue_messages(unclear), mismatches, c.cheque.unclear_messages(unclear)
+    # A sent payee name is compared above, so the cheque's own "payee missing" would repeat it
+    skip = frozenset({IssueCode.PAYEE_ISSUE}) if (payment.ChequepayeeName or "").strip() else frozenset()
+    return c.cheque.issue_messages(unclear, skip), mismatches, c.cheque.unclear_messages(unclear)
 
 
 def _other_issues(payment: RentPayment, c: _Candidate) -> list[str]:

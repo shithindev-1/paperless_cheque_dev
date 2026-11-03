@@ -1,16 +1,15 @@
 """Cheque entity schema — also used as the OCR model's structured-output schema."""
 
-import calendar
-from datetime import date
 from enum import Enum
-from typing import Optional
+import re
+from typing import Annotated, Optional
 
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, Field, WithJsonSchema, field_validator, model_validator
 
-from app.core.timezones import now_uae
+from app.utils.amount_words import words_to_number
+from app.utils.arabic import western_digits
 from app.utils.dates import parse_date
 
-STALE_AFTER_MONTHS = 6
 CLEAR_COPY = "Please upload a clear copy."
 UNREADABLE_MESSAGE = "Cheque image is incomplete or unclear. Please upload a clear, full copy."
 MAX_DETAIL_LENGTH = 45  # longer model details are dropped; the base message is enough
@@ -30,11 +29,18 @@ class UnclearField(str, Enum):
     PAYEE_NAME = "payee_name"
     HOLDER_NAME = "holder_name"
     IBAN = "iban"
+    # Only part of the date is in doubt (e.g. year 2024 or 2026); the whole date is still dropped
+    DATE_DAY = "date_day"
+    DATE_MONTH = "date_month"
+    DATE_YEAR = "date_year"
 
+
+DATE_PARTS = (UnclearField.DATE_DAY, UnclearField.DATE_MONTH, UnclearField.DATE_YEAR)
+_DATE_FIELDS = {UnclearField.CHEQUE_DATE, *DATE_PARTS}
 
 FIELD_LABELS = {
     UnclearField.CHEQUE_DATE: "Date",
-    UnclearField.CHEQUE_AMOUNT: "Amount",
+    UnclearField.CHEQUE_AMOUNT: "Amount in figures",
     UnclearField.AMOUNT_IN_WORDS: "Amount in words",
     UnclearField.PAYEE_NAME: "Payee name",
     UnclearField.HOLDER_NAME: "Holder name",
@@ -43,7 +49,7 @@ FIELD_LABELS = {
 
 # Fields every cheque must have readable; holder name / IBAN only matter when the caller sends them
 CORE_FIELDS = (UnclearField.CHEQUE_DATE, UnclearField.CHEQUE_AMOUNT,
-               UnclearField.AMOUNT_IN_WORDS, UnclearField.PAYEE_NAME)
+               UnclearField.AMOUNT_IN_WORDS, UnclearField.PAYEE_NAME, *DATE_PARTS)
 
 
 class IssueCode(str, Enum):
@@ -64,7 +70,7 @@ ISSUE_MESSAGES = {
     IssueCode.AMOUNT_MISMATCH: "Amount in words does not match figures",
     IssueCode.AMOUNT_MISSING: "Amount in words or figures is missing",
     IssueCode.DATE_ISSUE: "Cheque date is not valid",
-    IssueCode.PAYEE_ISSUE: "Payee name is missing or overwritten",
+    IssueCode.PAYEE_ISSUE: "Payee name is missing",
     IssueCode.SIGNATURE_MISSING: "Signature missing",
     IssueCode.MIXED_LANGUAGE: "Cheque is filled in a mix of English and Arabic",
     IssueCode.DAMAGED: "Cheque appears damaged",
@@ -89,7 +95,7 @@ _NEEDS_CLEAR_COPY = {IssueCode.ILLEGIBLE, IssueCode.IMAGE_INCOMPLETE, IssueCode.
 _COVERED_BY_UNCLEAR = {
     IssueCode.ILLEGIBLE: set(CORE_FIELDS),
     IssueCode.AMOUNT_MISSING: {UnclearField.CHEQUE_AMOUNT, UnclearField.AMOUNT_IN_WORDS},
-    IssueCode.DATE_ISSUE: {UnclearField.CHEQUE_DATE},
+    IssueCode.DATE_ISSUE: _DATE_FIELDS,
     IssueCode.PAYEE_ISSUE: {UnclearField.PAYEE_NAME},
 }
 
@@ -116,20 +122,32 @@ class ChequeIssue(BaseModel):
         return f"{base} ({detail})."
 
 
+def _join(words: list[str]) -> str:
+    return words[0] if len(words) == 1 else ", ".join(words[:-1]) + " and " + words[-1]
+
+
+def _labels(fields: list[UnclearField]) -> list[str]:
+    """Field labels; doubtful date parts become one label: 'Day and year of the cheque date'."""
+    fields = [UnclearField(f) for f in dict.fromkeys(fields)]
+    if UnclearField.CHEQUE_DATE in fields:  # the whole date covers its parts
+        fields = [f for f in fields if f not in DATE_PARTS]
+    labels, parts_added = [], False
+    for f in fields:
+        if f not in DATE_PARTS:
+            labels.append(FIELD_LABELS[f])
+        elif not parts_added:
+            parts = [p.value.removeprefix("date_") for p in DATE_PARTS if p in fields]
+            labels.append(f"{_join(parts).capitalize()} of the cheque date")
+            parts_added = True
+    return labels
+
+
 def unclear_message(fields: list[UnclearField]) -> str:
-    """'Date and payee name are not clearly visible.'"""
-    labels = [FIELD_LABELS[UnclearField(f)] for f in dict.fromkeys(fields)]
+    """'Date and payee name are not clearly visible.' / 'Year of the cheque date is not clearly visible.'"""
+    labels = _labels(fields)
     labels = [labels[0]] + [label if label == "IBAN" else label[0].lower() + label[1:]
                             for label in labels[1:]]
-    text = labels[0] if len(labels) == 1 else ", ".join(labels[:-1]) + " and " + labels[-1]
-    return f"{text} {'is' if len(labels) == 1 else 'are'} not clearly visible."
-
-
-def _months_before(day: date, months: int) -> date:
-    month_index = day.year * 12 + day.month - 1 - months
-    year, month = divmod(month_index, 12)
-    month += 1
-    return date(year, month, min(day.day, calendar.monthrange(year, month)[1]))
+    return f"{_join(labels)} {'is' if len(labels) == 1 else 'are'} not clearly visible."
 
 
 def _fmt_amount(value: float) -> str:
@@ -171,7 +189,7 @@ class ChequeEntity(BaseModel):
         """Unclear core fields, plus unclear holder name / IBAN when the caller sent them."""
         return [f for f in self.unclear_fields if f in CORE_FIELDS] + list(extra_unclear)
 
-    def issue_messages(self, unclear: list[UnclearField]) -> list[str]:
+    def issue_messages(self, unclear: list[UnclearField], skip: frozenset = frozenset()) -> list[str]:
         """Issue messages, signature / words vs figures / damage first.
 
         A cut-off / blurred / illegible cheque gets one short message: everything else
@@ -179,8 +197,8 @@ class ChequeEntity(BaseModel):
         """
         if self.unreadable:
             return [UNREADABLE_MESSAGE]
-        issues = [i for i in self.issues
-                  if not _COVERED_BY_UNCLEAR.get(i.code, set()) & set(unclear)]
+        issues = [i for i in self.issues if i.code not in skip
+                  and not _COVERED_BY_UNCLEAR.get(i.code, set()) & set(unclear)]
         issues.sort(key=lambda i: FIRST_ISSUES.index(i.code) if i.code in FIRST_ISSUES
                     else len(FIRST_ISSUES))
         return [i.message for i in issues]
@@ -198,6 +216,22 @@ class ChequeEntity(BaseModel):
         """Client messages for everything that makes this cheque unacceptable (empty = fine)."""
         unclear = self.unclear(extra_unclear)
         return self.issue_messages(unclear) + self.unclear_messages(unclear)
+
+
+# The model sometimes repeats digits ("0000…") in numeric JSON fields until the output limit
+# cuts the response. Asking for numbers as short strings avoids it; values are parsed back
+# to numbers on validation, so the rest of the code (and the public API) still sees numbers.
+# maxLength stops a runaway answer early (a loop used to burn ~6,000 tokens and 25 s per try)
+_NUMBER_AS_TEXT = WithJsonSchema({"anyOf": [{"type": "string", "maxLength": 12}, {"type": "null"}]})
+_NUMBER = re.compile(r"-?\d+(?:\.\d+)?")
+
+
+def _parse_number(value):
+    """'6,667.00' / 'AED 6667' / '٦٬٢٥٠' / 6667 -> number; anything without a number -> None."""
+    if value is None or isinstance(value, (int, float)):
+        return value
+    match = _NUMBER.search(western_digits(str(value)).replace(",", "").replace(" ", ""))
+    return float(match.group()) if match else None
 
 
 class TextTop(str, Enum):
@@ -219,22 +253,49 @@ class ChequeOcr(ChequeEntity):
     serialised to clients.
     """
 
-    page: Optional[int] = Field(None, description="1-based page number (1 for images)")
+    # Numbers are requested as short strings (see _NUMBER_AS_TEXT) and parsed back below
+    cheque_amount: Annotated[Optional[float], _NUMBER_AS_TEXT] = Field(
+        None, description="Amount in figures, digits only, e.g. '6667' or '6667.50'"
+    )
+    installment_number: Annotated[Optional[int], _NUMBER_AS_TEXT] = Field(
+        None, description="Installment number written on the cheque, e.g. '2'; null if none"
+    )
+    # English spelling of a name written in Arabic, so an English name in the request can be compared
+    payee_name_latin: Optional[str] = Field(
+        None, description="English spelling of payee_name if it is written in Arabic; else null"
+    )
+    holder_name_latin: Optional[str] = Field(
+        None, description="English spelling of holder_name if it is written in Arabic; else null"
+    )
+    holder_name_ar: Optional[str] = Field(
+        None, description="Account holder name as printed in Arabic; null if not printed in Arabic"
+    )
+    page: Annotated[Optional[int], _NUMBER_AS_TEXT] = Field(
+        None, description="1-based page number ('1' for images)"
+    )
     bounding_box: Optional[list[int]] = Field(
         None, description="[ymin, xmin, ymax, xmax] of the whole cheque, normalised 0-1000"
     )
     text_top: Optional[TextTop] = Field(
         None, description="Direction the top of the cheque's printed text points in the image"
     )
-    tilt_degrees: Optional[float] = Field(
+    tilt_degrees: Annotated[Optional[float], _NUMBER_AS_TEXT] = Field(
         None, description="Small clockwise tilt (-45 to 45) still needed once the text points up"
     )
     needs_crop: Optional[bool] = Field(
         None, description="True if the image contains much more than this cheque"
     )
-    amount_in_words_value: Optional[float] = Field(
-        None, description="The number the amount in words states, e.g. 'Five Thousand Only' -> 5000"
-    )
+
+    @field_validator("cheque_amount", "tilt_degrees", mode="before")
+    @classmethod
+    def _parse_decimal(cls, v):
+        return _parse_number(v)
+
+    @field_validator("installment_number", "page", mode="before")
+    @classmethod
+    def _parse_whole(cls, v):
+        number = _parse_number(v)
+        return None if number is None else round(number)
 
     @property
     def quarter_turn(self) -> int:
@@ -254,9 +315,11 @@ class ChequeOcr(ChequeEntity):
 
         # Never keep a value the model itself marked as unclear: it would be a guess
         for field in unclear:
-            setattr(self, field.value, None)
-        if unclear & {UnclearField.AMOUNT_IN_WORDS, UnclearField.CHEQUE_AMOUNT}:
-            self.amount_in_words_value = None
+            setattr(self, "cheque_date" if field in DATE_PARTS else field.value, None)
+            if field in (UnclearField.PAYEE_NAME, UnclearField.HOLDER_NAME):
+                setattr(self, f"{field.value}_latin", None)
+            if field == UnclearField.HOLDER_NAME:
+                self.holder_name_ar = None
 
         if not issues.keys() & UNREADABLE_ISSUES:  # nothing is derived from a bad image
             self._derive_issues(issues, unclear)
@@ -275,11 +338,11 @@ class ChequeOcr(ChequeEntity):
 
     def _derive_issues(self, issues: dict, unclear: set) -> None:
         """Checks the backend decides from the values: words vs figures, missing amount, date."""
-        # Words vs figures: decided by the numbers, not by the model's opinion
-        if self.amount_in_words_value is not None and self.cheque_amount is not None:
-            if abs(self.amount_in_words_value - self.cheque_amount) >= 0.01:
-                words = (self.amount_in_words or "").strip().rstrip(".") \
-                    or _fmt_amount(self.amount_in_words_value)
+        # Words vs figures: the backend converts the words itself (the model only reads them)
+        words_value = words_to_number(self.amount_in_words)
+        if words_value is not None and self.cheque_amount is not None:
+            if abs(words_value - self.cheque_amount) >= 0.01:
+                words = self.amount_in_words.strip().rstrip(".")
                 issues[IssueCode.AMOUNT_MISMATCH] = ChequeIssue(
                     code=IssueCode.AMOUNT_MISMATCH,
                     detail=f"Amount in words ({words}) does not match "
@@ -292,15 +355,13 @@ class ChequeOcr(ChequeEntity):
                 unclear & {UnclearField.CHEQUE_AMOUNT, UnclearField.AMOUNT_IN_WORDS}):
             issues.setdefault(IssueCode.AMOUNT_MISSING, ChequeIssue(code=IssueCode.AMOUNT_MISSING))
 
-        cheque_date = parse_date(self.cheque_date)
-        if cheque_date is None and UnclearField.CHEQUE_DATE not in unclear:
+        # A readable date is judged by the DueDate comparison (wrong / old dates fail there);
+        # only a cheque with no usable date at all is flagged here
+        if parse_date(self.cheque_date) is not None:
+            issues.pop(IssueCode.DATE_ISSUE, None)
+        elif not unclear & _DATE_FIELDS:
             issues.setdefault(IssueCode.DATE_ISSUE, ChequeIssue(code=IssueCode.DATE_ISSUE,
                                                                 detail="date missing"))
-        elif cheque_date and cheque_date < _months_before(now_uae().date(), STALE_AFTER_MONTHS):
-            issues[IssueCode.DATE_ISSUE] = ChequeIssue(
-                code=IssueCode.DATE_ISSUE,
-                detail=f"dated {self.cheque_date}, more than {STALE_AFTER_MONTHS} months old",
-            )
 
 
 class ChequeExtraction(BaseModel):

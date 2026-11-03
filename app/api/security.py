@@ -9,6 +9,7 @@ from fastapi.security import APIKeyHeader
 
 from app.core.config import Settings, get_settings
 from app.core.exceptions import AuthenticationError
+from app.core.tracing import current_trace, key_fingerprint
 
 logger = logging.getLogger(__name__)
 
@@ -31,6 +32,9 @@ async def require_api_key(
         hmac.compare_digest(api_key.encode(), key.get_secret_value().encode())
         for key in settings.api_keys
     ):
+        trace = current_trace()
+        if trace:  # which client / key was used, never the key itself
+            trace.record["client"]["api_key_id"] = key_fingerprint(api_key)
         return
     client = request.client.host if request.client else "unknown"
     logger.warning("Rejected %s %s from %s: %s API key", request.method, request.url.path,

@@ -15,22 +15,34 @@ EXTRACTION_PROMPT = """
 Extract these fields from every cheque in the attached file:
 
 - cheque_date: the date written on the cheque, as DD-MM-YYYY. UAE cheques use DD/MM/YYYY.
-- cheque_amount: the amount written in FIGURES, number only, no commas or currency.
+- cheque_amount: the amount written in FIGURES as a short string of digits: no commas, currency
+  or trailing zeros ("6667", "6667.5", not "6667.00").
 - amount_in_words: the amount written in WORDS, exactly as written (English if both English and Arabic).
-- amount_in_words_value: the number those words state, e.g. "Five Thousand Five Hundred Only" -> 5500.
   Read figures and words independently; never correct one from the other.
-- installment_number: integer from notes such as "1st Inst", "Inst 2/4", "2 of 4" -> 1, 2, 2. Otherwise null.
+- installment_number: from notes such as "1st Inst", "Inst 2/4", "2 of 4" -> "1", "2", "2". Null if no
+  installment is written (most cheques have none).
 - service: exactly one of "Property Rent", "Security Deposit", "VAT on Rent", "Handling Fee", based on the memo/remarks:
     rent -> Property Rent | deposit / SD -> Security Deposit | VAT / tax -> VAT on Rent | admin / handling / processing fee -> Handling Fee.
   Null if not indicated.
 - payee_name: the name written on the "Pay to" / "Pay" line, exactly as written. Null if blank.
 - holder_name: the account holder's name printed on the cheque (usually near the signature or
   account number), exactly as printed. If printed in English and Arabic, use English. Null if absent.
+- payee_name_latin / holder_name_latin: only when that name is written in Arabic, its usual English
+  spelling (e.g. "محمد علي" -> "Mohamed Ali"). Null if the name is already in English, blank or unclear.
+- holder_name_ar: the account holder's name as printed in ARABIC script, exactly as printed (often printed
+  beside the English name). Null if the holder name is not printed in Arabic.
 - iban: the IBAN printed on the cheque (e.g. AE07 0331 2345 6789 0123 456), as printed. Null if absent.
   Do not use the cheque number, account number or routing code as the IBAN.
 - unclear_fields: list every field from cheque_date, cheque_amount, amount_in_words, payee_name,
   holder_name, iban that IS on the cheque but cannot be read with certainty (blurred, faded,
-  smudged, cut off, covered, low resolution). Return null for those fields; never guess.
+  smudged, cut off, covered, low resolution, small handwriting). Return null for those fields; never guess.
+  A field is uncertain if even ONE character or digit in it could be read as another (e.g. 4/6,
+  1/7, 3/8, 5/6, 0/6/8, 2/7): do not pick the more likely one.
+  For the date, be specific: if only part of it is uncertain, list "date_day", "date_month"
+  and/or "date_year" instead of cheque_date (e.g. the year could be 2024 or 2026 -> "date_year"),
+  and return cheque_date as null. Use cheque_date only when the whole date is unreadable.
+  Take extra care when the image holds several cheques or the cheque is small: zoom into each
+  digit; small handwriting you cannot read with certainty is uncertain.
   A field that is simply not printed on the cheque is null and NOT listed here. Empty list if all clear.
   If the whole image is blurred or degraded, list every unreadable field, return null for each,
   and report IMAGE_INCOMPLETE. A value you are not certain of must be null, never a best guess.
@@ -44,9 +56,8 @@ Extract these fields from every cheque in the attached file:
     AMOUNT_MISMATCH – amount in words and amount in figures do not represent the same value
       (detail: "Amount in words (<words as written>) does not match figures (<figures>)").
     AMOUNT_MISSING – amount in words or figures is blank or unreadable.
-    DATE_ISSUE – date missing, incomplete, invalid (e.g. 31 June), unreadable, or more than
-      6 months before today ({today}). Post-dated cheques are fine.
-    PAYEE_ISSUE – payee name missing, unreadable, or overwritten.
+    DATE_ISSUE – date missing, incomplete or impossible (e.g. 31 June). Do not judge how old it is.
+    PAYEE_ISSUE – payee line left blank (overwriting is reported as ALTERATION).
     SIGNATURE_MISSING – no drawer signature in the signature area.
     MIXED_LANGUAGE – fields filled in a mix of English and Arabic in a way that could cause confusion.
     DAMAGED – cheque torn, stained, folded over key fields, or MICR line at the bottom damaged or covered

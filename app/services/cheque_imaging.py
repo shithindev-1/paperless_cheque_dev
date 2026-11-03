@@ -8,14 +8,16 @@ FileResult.cheque_files.
 
 import asyncio
 import logging
+import time
 from pathlib import Path, PurePosixPath
 from typing import Optional
 
 from app.core.config import Settings
+from app.core.tracing import current_trace
 from app.schemas import FileResult
 from app.services.blob_storage import get_blob_storage
 from app.services.file_loader import is_url, redact
-from app.services.image_processor import needs_processing, process_cheque
+from app.services.image_processor import needs_processing, process_cheque_detailed
 from app.utils.files import UploadedFile
 
 logger = logging.getLogger(__name__)
@@ -47,20 +49,36 @@ async def attach_cheque_files(
     for i, cheque in enumerate(cheques, start=1):
         if only is not None and i - 1 not in only:
             continue
+        step = {"file": file.trace.get("index"), "cheque": i, "page": cheque.page,
+                "needs_crop": cheque.needs_crop}
+        start = time.perf_counter()
         try:
-            image = await asyncio.to_thread(
-                process_cheque, file.data, file.mime_type, cheque,
+            image, info = await asyncio.to_thread(
+                process_cheque_detailed, file.data, file.mime_type, cheque,
                 padding_percent=settings.crop_padding_percent,
                 dpi=settings.pdf_render_dpi,
                 quality=settings.processed_jpeg_quality,
             )
+            step.update(info, process_ms=_ms(start))
+            saved = time.perf_counter()
             result.cheque_files[i - 1] = await save(i, image)
-            logger.info("[%s] Processed cheque %d of %s (page=%s, rotation=%s, crop=%s) -> %s",
-                        request_id, i, redact(source), cheque.page, cheque.rotation_degrees,
-                        cheque.needs_crop, redact(result.cheque_files[i - 1]))
-        except Exception:  # keep the original file for this cheque
+            step.update(save_ms=_ms(saved), size_kb=round(len(image) / 1024, 1),
+                        output=redact(result.cheque_files[i - 1]), status="ok")
+            logger.info("[%s] Processed cheque %d of %s (page=%s, turn=%s, tilt=%s, crop=%s) -> %s",
+                        request_id, i, redact(source), cheque.page, info["quarter_turn"],
+                        info["tilt_applied"], cheque.needs_crop, redact(result.cheque_files[i - 1]))
+        except Exception as exc:  # keep the original file for this cheque
+            step.update(status="failed", error=f"{type(exc).__name__}: {str(exc)[:200]}",
+                        process_ms=_ms(start))
             logger.exception("[%s] Could not process cheque %d of %s; keeping original",
                              request_id, i, redact(source))
+        trace = current_trace()
+        if trace:
+            trace.cheque_processed(**step)
+
+
+def _ms(start: float) -> int:
+    return int((time.perf_counter() - start) * 1000)
 
 
 def processed_name(

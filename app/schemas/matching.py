@@ -24,6 +24,7 @@ class RentPayment(BaseModel):
     # Optional: checked against the cheque only when a value is sent
     ChequepayeeName: Optional[str] = Field(None, description="Expected 'Pay to' name")
     ChequeHolderName: Optional[str] = Field(None, description="Expected account holder name")
+    ChequeHolderNameAr: Optional[str] = Field(None, description="Expected account holder name in Arabic")
     ChequeHolderIBAN: Optional[str] = Field(None, description="Expected account holder IBAN")
 
     # Filled by the API; any value sent in the request is ignored

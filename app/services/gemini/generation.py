@@ -9,6 +9,7 @@ from google.genai import errors, types
 from pydantic import BaseModel
 
 from app.core.config import Settings
+from app.core.tracing import current_trace
 from app.schemas import TokenUsage
 
 logger = logging.getLogger(__name__)
@@ -64,6 +65,7 @@ async def generate_structured(
     config: types.GenerateContentConfig,
     response_model: type[T],
     max_retries: int = 2,
+    label: str = "",
 ) -> tuple[T, TokenUsage]:
     """Call Gemini, parse the JSON response into `response_model`, and return token usage.
 
@@ -72,6 +74,7 @@ async def generate_structured(
     """
     attempt = 0
     while True:
+        usage, text = None, None
         try:
             response = await client.aio.models.generate_content(
                 model=model, contents=contents, config=config
@@ -79,10 +82,11 @@ async def generate_structured(
             usage = extract_usage(response)
             if isinstance(response.parsed, response_model):
                 return response.parsed, usage
-            if not response.text:
+            text = response.text
+            if not text:
                 reason = response.candidates[0].finish_reason if response.candidates else "unknown"
                 raise ValueError(f"Empty response from model (finish_reason={reason})")
-            return response_model.model_validate_json(response.text), usage
+            return response_model.model_validate_json(text), usage
 
         except errors.APIError as exc:
             if exc.code not in RETRYABLE_STATUS_CODES or attempt >= max_retries:
@@ -90,6 +94,7 @@ async def generate_structured(
             delay = 2 ** attempt
             logger.warning("Gemini error %s, retrying in %ss (attempt %s/%s)",
                            exc.code, delay, attempt + 1, max_retries)
+            _trace_retry(label, attempt + 1, f"API error {exc.code}", None, None)
             await asyncio.sleep(delay)
             attempt += 1
 
@@ -98,4 +103,17 @@ async def generate_structured(
                 raise
             logger.warning("Invalid model output (%s), retrying (attempt %s/%s)",
                            str(exc).splitlines()[0][:200], attempt + 1, max_retries)
+            # Tokens of the failed attempt are still billed: keep them in the trace
+            _trace_retry(label, attempt + 1, str(exc).splitlines()[0][:200], usage, text)
             attempt += 1
+
+
+def _trace_retry(label: str, attempt: int, reason: str, usage: Optional[TokenUsage],
+                 text: Optional[str]) -> None:
+    trace = current_trace()
+    if trace:
+        # Start and end of a broken answer show which field it got stuck on
+        trace.event("model_retry", file=label, attempt=attempt, reason=reason,
+                    wasted_tokens=usage.total_tokens if usage else None,
+                    output_start=text[:160] if text else None,
+                    output_end=text[-60:] if text and len(text) > 160 else None)

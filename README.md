@@ -193,9 +193,17 @@ Response — the payment list with three keys filled (other keys are returned un
 | Amount differs | `Amount doesn't match. Cheque amount is 5,000.` |
 | Both differ | `Amount and date don't match. Cheque shows 5,000 dated 01-10-2026.` |
 
-Optional per payment: `ChequepayeeName`, `ChequeHolderName`, `ChequeHolderIBAN`. When a value
-is sent it must also match the cheque (names: case and extra spaces ignored, nothing else;
+Optional per payment: `ChequepayeeName`, `ChequeHolderName`, `ChequeHolderNameAr` (holder name in
+Arabic), `ChequeHolderIBAN`. When a value
+is sent it must also match the cheque (names: case, spaces and punctuation ignored, every letter must match;
 IBAN: spaces ignored). Empty or missing values are not checked.
+Names may be sent in English or Arabic (`ChequeHolderNameAr` is the holder name in Arabic). Each is
+compared with the name on the cheque in the same script when the cheque has one (every letter must
+match); the holder may be printed in both. Only when the cheque has the name in the other script
+are they compared by sound (vowels, doubled letters and a final h ignored: `Mohammed Aly` =
+`محمد علي` = `Mohamed Ali`). A mismatch shows the cheque's name, with its English spelling for an
+Arabic name: `Holder name doesn't match. Cheque shows محمد علي (Mohamed Ali).`
+Arabic-Indic digits (١٠/١١/٢٠٢٦, ٦٬٢٥٠) are accepted in cheque dates, amounts, IBANs and DueDate.
 
 | Case | `OcrResponse` (added to any amount / date reason) |
 |---|---|
@@ -214,8 +222,8 @@ amount / date / name reason:
 | ALTERATION | `Overwriting or strike-through found on the <field>. UAE banks do not accept altered cheques. Please provide a new cheque.` — any strike-through, overwritten character or correction, even if initialled |
 | AMOUNT_MISMATCH | `Amount in words (Five Thousand) does not match figures (8,000).` — decided by the backend from both values |
 | AMOUNT_MISSING | `Amount in words or figures is missing.` |
-| DATE_ISSUE | `Cheque date is not valid (<reason>).` — stale (> 6 months old) is decided by the backend; post-dated is fine |
-| PAYEE_ISSUE | `Payee name is missing or overwritten.` |
+| DATE_ISSUE | `Cheque date is not valid (date missing).` — only when there is no readable date; a readable date (old, wrong) is judged by the DueDate comparison |
+| PAYEE_ISSUE | `Payee name is missing.` — only when `ChequepayeeName` is not sent (otherwise the comparison reports it); overwriting is ALTERATION |
 | SIGNATURE_MISSING | `Signature missing.` |
 | MIXED_LANGUAGE | `Cheque is filled in a mix of English and Arabic.` |
 | DAMAGED | `Cheque appears damaged near the MICR line.` (location from the OCR) |
@@ -225,6 +233,9 @@ amount / date / name reason:
 Fields that are present but unreadable are never guessed or compared:
 `Payee name is not clearly visible.` Unclear fields, ILLEGIBLE, IMAGE_INCOMPLETE and DAMAGED
 add `Please upload a clear copy.` Holder name / IBAN are only considered when sent.
+A field is treated as unclear if even one character or digit is in doubt (e.g. 4 vs 6). For the
+date the message names the doubtful part: `Year of the cheque date is not clearly visible.`
+(also day / month); the whole date is then dropped, never guessed.
 
 Messages stay short: a cut-off, blurred or illegible cheque (IMAGE_INCOMPLETE / ILLEGIBLE,
 or a page below `min_image_sharpness`) returns only
@@ -261,7 +272,28 @@ testing, processed images are written into `local_files_dir`.
 | File | Content |
 |---|---|
 | `logs/app/YYYY-MM-DD.log` | Application log; every line has UAE and IST time, per-file token usage and timings, per-payment match results |
-| `logs/results/YYYY-MM-DD.jsonl` | One JSON record per request: UAE/IST timestamps, totals, token usage, full results |
+| `logs/results/YYYY-MM-DD.jsonl` | **One JSON line per API hit** (the request trace, below) |
+
+Every `/cheques/*` call gets a `request_id`, returned to the caller as the `X-Request-ID` header.
+The app log ends each hit with `[<request_id>] SUMMARY {...}`; the full record is one line in the
+results log:
+
+| Key | Content |
+|---|---|
+| `request_id`, `endpoint`, `type` | Identify the hit (`match` / `extract`) |
+| `started_at`, `finished_at` | UAE and IST timestamps (ms) |
+| `total_ms`, `status_code`, `outcome` | Duration and result (`success` / `client_error` / `server_error`) |
+| `client` | IP, user agent, `api_key_id` (fingerprint of the key used, never the key) |
+| `app` | Version, environment, model |
+| `counts` | Files, files ok / failed, payments, cheques found, cheques cropped, matched / unmatched |
+| `stages_ms` | `load`, `extraction`, `matching`, `cropping` (match); `validation`, `extraction` (extract) |
+| `files[]` | Per file: source, size, type, `load_ms`, `queue_wait_ms`, `model_ms`, `quality_check_ms`, `sharpness`, tokens, status / error, cheque summary (date, amount, orientation, issues — no names or IBANs) |
+| `cheques_processed[]` | Per cropped cheque: quarter turn, measured / applied tilt, output size, `process_ms`, `save_ms`, output file |
+| `payments[]` | Per payment: id, amount, due date, which name/IBAN checks were sent (not the values), matched cheque, files, `OcrResponse` |
+| `issues_summary` | Count per issue code (e.g. `{"SIGNATURE_MISSING": 1}`) |
+| `usage` | Total tokens |
+| `events[]` | Model retries, with reason and wasted tokens |
+| `errors[]` | Load / validation / auth / model / unexpected errors |
 
 Files roll over at UAE midnight. URL query strings (e.g. SAS tokens) are removed before logging.
 `logs/` is excluded from version control.

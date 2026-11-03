@@ -9,7 +9,7 @@ from google.genai import types
 
 from app.core.config import Settings
 from app.core.exceptions import ExtractionError
-from app.core.timezones import now_uae
+from app.core.tracing import trace_file
 from app.prompts import EXTRACTION_PROMPT, SYSTEM_INSTRUCTION
 from app.schemas import ChequeEntity, ChequeExtraction, ChequeOcr, FileResult
 from app.schemas.cheque import ChequeIssue, IssueCode
@@ -35,24 +35,33 @@ class ChequeExtractor:
         self._semaphore = asyncio.Semaphore(settings.max_concurrent_requests)
 
     async def extract_one(self, file: UploadedFile) -> FileResult:
+        entry = trace_file(file)
+        queued = time.perf_counter()
         async with self._semaphore:
             start = time.perf_counter()
+            entry["queue_wait_ms"] = int((start - queued) * 1000)
             logger.info("Processing %s (%s, %.1f KB)",
                         file.name, file.mime_type, len(file.data) / 1024)
             try:
                 result, usage = await generate_structured(
+                    label=file.name,
                     client=self.client,
                     model=self.settings.gemini_model,
                     contents=[
                         types.Part.from_bytes(data=file.data, mime_type=file.mime_type),
-                        EXTRACTION_PROMPT.replace("{today}", now_uae().strftime("%d-%m-%Y")),
+                        EXTRACTION_PROMPT,
                     ],
                     config=self.config,
                     response_model=ChequeExtraction,
                     max_retries=self.settings.gemini_max_retries,
                 )
-                result.cheques = await self._drop_unreadable(file, result.cheques)
+                entry["model_ms"] = _elapsed_ms(start)
+                quality_start = time.perf_counter()
+                result.cheques = await self._drop_unreadable(file, result.cheques, entry)
+                entry["quality_check_ms"] = _elapsed_ms(quality_start)
                 elapsed = _elapsed_ms(start)
+                entry.update(status="success", extraction_ms=elapsed, tokens=usage.model_dump(),
+                             cheques=[_cheque_summary(c) for c in result.cheques])
                 logger.info(
                     "Done %s | cheques=%d | tokens: prompt=%d output=%d thinking=%d total=%d | %d ms",
                     file.name, len(result.cheques), usage.prompt_tokens, usage.output_tokens,
@@ -68,6 +77,9 @@ class ChequeExtractor:
             except Exception as exc:  # one bad file must not fail the whole batch
                 # Full Gemini/internal error goes to the log; the client gets a general message
                 logger.exception("Extraction failed for %s", file.name)
+                entry.update(status="extraction_error", extraction_ms=_elapsed_ms(start),
+                             error=ExtractionError.message,
+                             error_detail=f"{type(exc).__name__}: {str(exc).splitlines()[0][:300]}")
                 return FileResult(
                     file_name=file.name,
                     status="error",
@@ -76,7 +88,9 @@ class ChequeExtractor:
                     processing_time_ms=_elapsed_ms(start),
                 )
 
-    async def _drop_unreadable(self, file: UploadedFile, cheques: list[ChequeOcr]) -> list[ChequeOcr]:
+    async def _drop_unreadable(
+        self, file: UploadedFile, cheques: list[ChequeOcr], entry: dict
+    ) -> list[ChequeOcr]:
         """Measured, not model-judged: a page too blurred / low-res to read keeps no values at all.
 
         The model can invent dates and amounts on images nobody can read, so the decision is
@@ -95,6 +109,8 @@ class ChequeExtractor:
                 logger.warning("Could not measure image quality of %s page %s",
                                file.name, page, exc_info=True)
         blurry = {page for page, score in scores.items() if score < threshold}
+        entry["sharpness"] = {str(p): round(s, 1) for p, s in scores.items()}
+        entry["unreadable_pages"] = sorted(blurry)
         if not blurry:
             return cheques
         logger.info("%s: too blurred / low resolution (sharpness %s < %s); values dropped",
@@ -127,6 +143,23 @@ def infer_installments(cheques: list[ChequeEntity]) -> None:
         for number, cheque in enumerate(group, start=1):
             if cheque.installment_number is None:
                 cheque.installment_number = number
+
+
+def _cheque_summary(cheque: ChequeOcr) -> dict:
+    """What the trace keeps per cheque: no names or IBANs, only what is needed to debug."""
+    return {
+        "page": cheque.page,
+        "date": cheque.cheque_date,
+        "amount": cheque.cheque_amount,
+        "text_top": cheque.text_top.value if cheque.text_top else None,
+        "tilt_degrees": cheque.tilt_degrees,
+        "needs_crop": cheque.needs_crop,
+        "unreadable": cheque.unreadable,
+        "unclear_fields": [f.value for f in cheque.unclear_fields],
+        "issues": [i.code.value for i in cheque.issues],
+        "fields_read": [f for f in ("payee_name", "holder_name", "iban", "amount_in_words")
+                        if getattr(cheque, f)],
+    }
 
 
 def _elapsed_ms(start: float) -> int:
