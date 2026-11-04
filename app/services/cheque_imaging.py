@@ -1,4 +1,5 @@
-"""Crop / straighten extracted cheques and save them next to the original file.
+"""Crop / straighten extracted cheques and save them next to the original file
+(or under the processed folder, for uploaded files).
 
 Only the cheques asked for (the matched ones) are processed, and only when the file
 holds several cheques or the OCR model reports the cheque needs cropping or rotation.
@@ -27,11 +28,12 @@ _PDF = "application/pdf"
 
 async def attach_cheque_files(
     source: str, file: UploadedFile, result: FileResult, settings: Settings, request_id: str,
-    only: Optional[set[int]] = None,
+    only: Optional[set[int]] = None, uploaded: bool = False,
 ) -> None:
     """Fill result.cheque_files with one URL / path per cheque.
 
     `only` limits processing to these cheque indexes (0-based); the rest keep the original.
+    `uploaded`: `source` is the name of a file sent in the request (no folder of its own).
     """
     cheques = result.cheques
     result.cheque_files = [source] * len(cheques)
@@ -40,7 +42,7 @@ async def attach_cheque_files(
     if only is not None and not only:
         return
 
-    save = _saver(source, settings, len(cheques), request_id)
+    save = _saver(source, settings, len(cheques), request_id, uploaded)
     if save is None:
         logger.info("[%s] %s needs crop/rotation but has no writable location; keeping original",
                     request_id, redact(source))
@@ -49,7 +51,7 @@ async def attach_cheque_files(
     for i, cheque in enumerate(cheques, start=1):
         if only is not None and i - 1 not in only:
             continue
-        step = {"file": file.trace.get("index"), "cheque": i, "page": cheque.page,
+        step = {"file": file.trace.get("index"), "cheque": i - 1, "page": cheque.page,  # 0-based, as in payments
                 "needs_crop": cheque.needs_crop}
         start = time.perf_counter()
         try:
@@ -98,11 +100,23 @@ def processed_name(
     return str(path.with_name(file_name))
 
 
-def _saver(source: str, settings: Settings, total: int, request_id: str):
+def _saver(source: str, settings: Settings, total: int, request_id: str, uploaded: bool = False):
     """Async `save(index, pdf_bytes) -> url_or_path` for this source, or None if not writable."""
     def name_for(original: str, index: int) -> str:
         return processed_name(original, settings.processed_file_suffix, index, total,
                               settings.processed_folder, request_id)
+
+    if uploaded:  # only the file name is known: saved under processed_folder/<request_id>/
+        original = PurePosixPath(source.replace("\\", "/")).name or "cheque"
+        if settings.local_files_enabled:
+            return _local_saver(settings, lambda index: name_for(original, index))
+        storage = get_blob_storage(settings)
+        if not storage or not settings.processed_folder:
+            return None
+
+        async def save_upload(index: int, data: bytes) -> str:
+            return await storage.upload(name_for(original, index), data, _PDF)
+        return save_upload
 
     if is_url(source):
         storage = get_blob_storage(settings)
@@ -116,10 +130,14 @@ def _saver(source: str, settings: Settings, total: int, request_id: str):
 
     if not settings.local_files_enabled:
         return None
+    return _local_saver(settings, lambda index: name_for(Path(source).as_posix(), index))
+
+
+def _local_saver(settings: Settings, name_of):
     base = Path(settings.local_files_dir).resolve()
 
     async def save_local(index: int, data: bytes) -> str:
-        name = name_for(Path(source).as_posix(), index)
+        name = name_of(index)
         target = (base / name).resolve()
         if not target.is_relative_to(base):
             raise ValueError("Processed file path escapes LOCAL_FILES_DIR")

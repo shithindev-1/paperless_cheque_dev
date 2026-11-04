@@ -35,6 +35,9 @@ async def validation_error_handler(request: Request, exc: RequestValidationError
     # Field path + reason only: the rejected input itself may be large or personal
     _trace_error("RequestValidationError", "Invalid request body",
                  fields=[{"loc": list(e.get("loc", ())), "msg": e.get("msg")} for e in exc.errors()])
+    if request.url.path.endswith("/match/upload"):
+        return _error(422, "Invalid request. Send the cheque files in 'files' and the payments as a "
+                           "JSON list in 'payments' (form-data).")
     if request.url.path.endswith("/match"):
         return _error(422, "Invalid request. Send 'file_urls' and 'payments' (each with Amount "
                            "and a valid DueDate) as JSON.")

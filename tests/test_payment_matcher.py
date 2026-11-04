@@ -124,6 +124,38 @@ def _named_payment(**fields) -> RentPayment:
     return RentPayment(Amount=8400, DueDate="2026-11-05", **fields)
 
 
+def test_cheque_info_object_is_checked_and_returned():
+    payment = RentPayment.model_validate({
+        "Amount": 8400, "DueDate": "2026-11-05",
+        "cheque_info": {"ChequepayeeName": "ABC LLC", "ChequeHolderName": "Omar Ali",
+                        "ChequeHolderIBAN": "AE07 0331 2345 6789 0123 456"},
+    })
+    match_payments([payment], [_named_file(payee_name="ABC LLC", holder_name="Omar Aly",
+                                           iban="AE070331234567890123456")])
+    assert payment.OcrResponse == "Holder name doesn't match. Cheque shows Omar Aly."
+    dumped = payment.model_dump()
+    assert dumped["cheque_info"] == {"ChequepayeeName": "ABC LLC", "ChequeHolderName": "Omar Ali",
+                                     "ChequeHolderNameAr": None,
+                                     "ChequeHolderIBAN": "AE07 0331 2345 6789 0123 456"}
+    assert "ChequepayeeName" not in dumped
+
+
+def test_flat_keys_still_accepted_and_moved_into_cheque_info():
+    payment = RentPayment.model_validate({"Amount": 1, "DueDate": "2026-11-05",
+                                          "ChequeHolderName": "Omar Ali",
+                                          "cheque_info": {"ChequepayeeName": "ABC LLC"}})
+    assert payment.expected("ChequeHolderName") == "Omar Ali"
+    assert payment.expected("ChequepayeeName") == "ABC LLC"
+    assert "ChequeHolderName" not in payment.model_dump()
+
+
+def test_cheque_info_null_or_empty_means_no_checks():
+    for info in (None, {}, {"ChequepayeeName": "  "}):
+        payment = RentPayment.model_validate({"Amount": 8400, "DueDate": "2026-11-05", "cheque_info": info})
+        match_payments([payment], [_named_file(payee_name="Someone Else")])
+        assert payment.OcrResponse == MATCHED
+
+
 def test_names_not_sent_are_not_checked():
     payments = [_named_payment()]
     match_payments(payments, [_named_file(payee_name="ABC LLC")])
@@ -340,6 +372,61 @@ def test_doubtful_date_parts_combined_with_other_fields():
                          unclear_fields=["date_day", "payee_name", "date_month"])
     assert cheque.error == ("Day and month of the cheque date and payee name are not clearly visible. "
                             "Please upload a clear copy.")
+
+
+def test_unclear_date_cheque_explains_the_payment_not_a_wrong_date_one():
+    from app.schemas import ChequeOcr
+
+    altered = [{"code": "ALTERATION", "detail": "date"}]
+    base = {"cheque_amount": 9333, "amount_in_words": "Nine Thousand Three Hundred Thirty Three Only",
+            "issues": altered}
+    files = [("a.jpg", FileResult(file_name="a.jpg", status="success",
+                                  cheques=[ChequeOcr(cheque_date="01-01-2024", **base)])),
+             ("b.jpg", FileResult(file_name="b.jpg", status="success",
+                                  cheques=[ChequeOcr(cheque_date=None, unclear_fields=["date_year"], **base)]))]
+    payment = RentPayment(Amount=9333, DueDate="2024-03-01")
+    match_payments([payment], files)
+    assert payment.MatchedOcrFileURL == "b.jpg"
+    assert payment.OcrResponse == (
+        "Overwriting or strike-through found on the date. UAE banks do not accept altered cheques. "
+        "Please provide a new cheque. Year of the cheque date is not clearly visible. Please upload a clear copy.")
+
+
+def test_exact_date_still_beats_unclear_date():
+    from app.schemas import ChequeOcr
+
+    words = "Nine Thousand Three Hundred Thirty Three Only"
+    files = [("a.jpg", FileResult(file_name="a.jpg", status="success", cheques=[
+                 ChequeOcr(cheque_date=None, cheque_amount=9333, amount_in_words=words,
+                           unclear_fields=["date_year"])])),
+             ("b.jpg", FileResult(file_name="b.jpg", status="success", cheques=[
+                 ChequeOcr(cheque_date="01-01-2024", cheque_amount=9333, amount_in_words=words,
+                           issues=[{"code": "SIGNATURE_MISSING"}])]))]
+    payment = RentPayment(Amount=9333, DueDate="2024-01-01")
+    match_payments([payment], files)
+    assert payment.MatchedOcrFileURL == "b.jpg"
+    assert payment.OcrResponse == "Signature missing."
+
+
+def test_cheque_with_missing_values_explains_the_payment_not_a_different_one():
+    from app.schemas import ChequeOcr
+
+    files = [("other.jpg", FileResult(file_name="other.jpg", status="success", cheques=[
+                 ChequeOcr(cheque_date="27-10-2026", cheque_amount=16800,
+                           amount_in_words="Sixteen Thousand Eight Hundred Only")])),
+             ("empty.jpg", FileResult(file_name="empty.jpg", status="success", cheques=[
+                 ChequeOcr(amount_in_words="Fourteen Thousand Only")]))]
+    payment = RentPayment(Amount=14000, DueDate="2027-08-10")
+    match_payments([payment], files)
+    assert payment.MatchedOcrFileURL == "empty.jpg"
+    assert "Amount in words or figures is missing." in payment.OcrResponse
+
+
+def test_untranslated_words_mismatch_uses_formatted_figures():
+    cheque = _ocr_cheque(cheque_amount="7250", amount_in_words="فقط ستة آلاف ومائتان وخمسون درهم لا غير",
+                         issues=[{"code": "AMOUNT_MISMATCH", "detail": "words 6250, figures 7250"}])
+    assert cheque.error == ("Amount in words (فقط ستة آلاف ومائتان وخمسون درهم لا غير) "
+                            "does not match figures (7,250).")
 
 
 def test_whole_date_unclear_covers_its_parts():

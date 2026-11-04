@@ -23,7 +23,7 @@ Built with FastAPI. OCR is performed by a hosted vision model configured through
 │   │       └── endpoints/          # Thin HTTP layer, no business logic
 │   │           ├── health.py       # GET  /api/v1/health
 │   │           ├── extraction.py   # POST /api/v1/cheques/extract
-│   │           └── matching.py     # POST /api/v1/cheques/match
+│   │           └── matching.py     # POST /api/v1/cheques/match and /match/upload
 │   ├── core/
 │   │   ├── config.py               # Settings (environment only, no secrets in code)
 │   │   ├── exceptions.py           # App exceptions with client-safe messages
@@ -107,7 +107,7 @@ changing `APP_ENV`, the matching `settings.<env>.json` and the secrets in `.env`
 
 ### Authentication
 
-`/cheques/extract` and `/cheques/match` require an **`X-API-Key`** header matching one of
+`/cheques/extract`, `/cheques/match` and `/cheques/match/upload` require an **`X-API-Key`** header matching one of
 `API_KEYS` in `.env` (comma-separated, so keys can be rotated without downtime).
 A missing or wrong key returns `401 {"error": "Invalid or missing API key."}`.
 `API_KEYS` is required when `APP_ENV` is `uat` or `prod`; `/health` stays open.
@@ -173,7 +173,9 @@ Request:
   "file_urls": ["https://<account>.blob.core.windows.net/<container>/cheque1.pdf?<sas>"],
   "payments": [
     {"RentPaymentId": 94814, "Installment": 1, "ServiceId": 1,
-     "ServiceDescription": "Property Rent", "Amount": 8400, "DueDate": "2026-11-05T00:00:00"}
+     "ServiceDescription": "Property Rent", "Amount": 8400, "DueDate": "2026-11-05T00:00:00",
+     "cheque_info": {"ChequepayeeName": "ABC LLC", "ChequeHolderName": "Omar Ali",
+                     "ChequeHolderNameAr": null, "ChequeHolderIBAN": "AE07 0331 2345 6789 0123 456"}}
   ]
 }
 ```
@@ -193,8 +195,10 @@ Response — the payment list with three keys filled (other keys are returned un
 | Amount differs | `Amount doesn't match. Cheque amount is 5,000.` |
 | Both differ | `Amount and date don't match. Cheque shows 5,000 dated 01-10-2026.` |
 
-Optional per payment: `ChequepayeeName`, `ChequeHolderName`, `ChequeHolderNameAr` (holder name in
-Arabic), `ChequeHolderIBAN`. When a value
+Optional per payment: a `cheque_info` object with `ChequepayeeName`, `ChequeHolderName`,
+`ChequeHolderNameAr` (holder name in Arabic), `ChequeHolderIBAN` (the object and every key may be
+null or left out; it is returned unchanged). The same keys sent directly on the payment (earlier
+format) are still accepted and moved into `cheque_info`. When a value
 is sent it must also match the cheque (names: case, spaces and punctuation ignored, every letter must match;
 IBAN: spaces ignored). Empty or missing values are not checked.
 Names may be sent in English or Arabic (`ChequeHolderNameAr` is the holder name in Arabic). Each is
@@ -243,6 +247,20 @@ or a page below `min_image_sharpness`) returns only
 compared or derived from it. Model details longer than 45 characters are left out.
 
 An empty `payments` or `file_urls` list returns `400`.
+
+### `POST /api/v1/cheques/match/upload`
+
+Same checks and response as `/cheques/match`, for cheque files **uploaded in the request**
+(useful for testing files from any folder, locally or on UAT). `multipart/form-data`:
+
+| Field | Value |
+|---|---|
+| `files` | One or more cheque files (repeat the field; same limits as `/extract`) |
+| `payments` | The payment list as a JSON string, same keys as `/cheques/match`, e.g. `[{"RentPaymentId": 1, "Amount": 9333, "DueDate": "2026-01-01", "cheque_info": {"ChequepayeeName": "ABC LLC"}}]` |
+
+`MatchedOcrFileURL` is the uploaded file name. Cropped cheques are saved under
+`<processed_folder>/<request-id>/` (blob storage on UAT, `local_files_dir` locally).
+An invalid `payments` value returns `422`.
 
 #### Cropping and rotation
 

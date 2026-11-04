@@ -72,6 +72,9 @@ Layout of each cheque (used to crop and straighten it):
 - page: 1-based page number the cheque is on (always 1 for an image).
 - bounding_box: [ymin, xmin, ymax, xmax] tightly around the whole cheque, as integers 0-1000
   relative to that page/image (0,0 = top-left). Include the full cheque edges, nothing else.
+- micr_box: [ymin, xmin, ymax, xmax] around the MICR code line (the row of special magnetic
+  digits printed along one long edge of the cheque, e.g. ⑈000123⑈ 123456789⑆ 0123456789⑈),
+  measured on the image exactly as given (not turned), same scale. Null if it is not visible.
 - text_top: which edge of the image the TOP of the cheque's printed text (bank name, "Date")
   points to: "up" (normal reading position), "right", "down" (upside down) or "left".
 - tilt_degrees: once the text points up, the small extra tilt as a number between -45 and 45

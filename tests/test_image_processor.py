@@ -93,3 +93,33 @@ def test_tilt_is_measured_from_the_image():
     tilted = rotate(image, 6)  # clockwise -> lines slope down to the right
     assert 5 < measure_tilt(tilted) < 7
     assert measure_tilt(np.full((400, 900, 3), 255, np.uint8)) is None  # nothing to measure
+
+
+# ── orientation from the MICR line (the model's text_top mixes up left / right) ──
+
+BOX = [100, 300, 900, 700]  # a sideways cheque: tall box in the image
+
+
+@pytest.mark.parametrize("micr, expected_top, turn", [
+    ([150, 640, 850, 690], "left", 90),    # MICR along the right edge -> cheque bottom is right
+    ([150, 310, 850, 360], "right", -90),  # MICR along the left edge
+    ([820, 320, 880, 680], "up", 0),       # MICR along the bottom
+    ([120, 320, 180, 680], "down", 180),   # MICR along the top -> upside down
+])
+def test_micr_line_decides_the_turn(micr, expected_top, turn):
+    cheque = ChequeOcr(bounding_box=BOX, micr_box=micr, text_top="up")  # text_top ignored
+    assert cheque.orientation.value == expected_top
+    assert cheque.quarter_turn == turn
+
+
+def test_wrong_text_top_is_overridden_by_micr():
+    # Real case: text top pointed right, model said "left" -> came out upside down
+    cheque = ChequeOcr(bounding_box=BOX, micr_box=[150, 310, 850, 360], text_top="left")
+    assert cheque.quarter_turn == -90
+
+
+@pytest.mark.parametrize("micr", [None, [480, 480, 520, 520], [1, 2, 3], [500, 300, 500, 300]])
+def test_unusable_micr_falls_back_to_text_top(micr):
+    cheque = ChequeOcr(bounding_box=BOX, micr_box=micr, text_top="right")
+    assert cheque.micr_text_top is None
+    assert cheque.quarter_turn == -90

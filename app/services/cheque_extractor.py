@@ -12,7 +12,7 @@ from app.core.exceptions import ExtractionError
 from app.core.tracing import trace_file
 from app.prompts import EXTRACTION_PROMPT, SYSTEM_INSTRUCTION
 from app.schemas import ChequeEntity, ChequeExtraction, ChequeOcr, FileResult
-from app.schemas.cheque import ChequeIssue, IssueCode
+from app.schemas.cheque import DATE_FIELDS, ChequeIssue, IssueCode, UnclearField
 from app.services.gemini import build_generation_config, generate_structured, get_gemini_client
 from app.services.image_processor import load_page, sharpness
 from app.utils.dates import parse_date
@@ -34,6 +34,21 @@ class ChequeExtractor:
         )
         self._semaphore = asyncio.Semaphore(settings.max_concurrent_requests)
 
+    async def _read(self, file: UploadedFile):
+        """One model call: the file plus the prompt, parsed into ChequeExtraction."""
+        return await generate_structured(
+            label=file.name,
+            client=self.client,
+            model=self.settings.gemini_model,
+            contents=[
+                types.Part.from_bytes(data=file.data, mime_type=file.mime_type),
+                EXTRACTION_PROMPT,
+            ],
+            config=self.config,
+            response_model=ChequeExtraction,
+            max_retries=self.settings.gemini_max_retries,
+        )
+
     async def extract_one(self, file: UploadedFile) -> FileResult:
         entry = trace_file(file)
         queued = time.perf_counter()
@@ -43,22 +58,25 @@ class ChequeExtractor:
             logger.info("Processing %s (%s, %.1f KB)",
                         file.name, file.mime_type, len(file.data) / 1024)
             try:
-                result, usage = await generate_structured(
-                    label=file.name,
-                    client=self.client,
-                    model=self.settings.gemini_model,
-                    contents=[
-                        types.Part.from_bytes(data=file.data, mime_type=file.mime_type),
-                        EXTRACTION_PROMPT,
-                    ],
-                    config=self.config,
-                    response_model=ChequeExtraction,
-                    max_retries=self.settings.gemini_max_retries,
-                )
+                result, usage = await self._read(file)
                 entry["model_ms"] = _elapsed_ms(start)
                 quality_start = time.perf_counter()
                 result.cheques = await self._drop_unreadable(file, result.cheques, entry)
                 entry["quality_check_ms"] = _elapsed_ms(quality_start)
+
+                # A sharp cheque read with no date and no amount, and nothing marked unclear, is a
+                # failed answer (seen on clear photos that read fine on the next call): read once more
+                if _has_empty_reading(result.cheques):
+                    retry_start = time.perf_counter()
+                    retry, retry_usage = await self._read(file)
+                    retry.cheques = await self._drop_unreadable(file, retry.cheques, entry)
+                    usage = usage + retry_usage
+                    better = _score(retry.cheques) > _score(result.cheques)
+                    if better:
+                        result = retry
+                    entry["empty_read_retry"] = {"used_retry": better, "retry_ms": _elapsed_ms(retry_start)}
+                    logger.info("%s: empty reading, read again (%s)", file.name,
+                                "second reading used" if better else "first reading kept")
                 elapsed = _elapsed_ms(start)
                 entry.update(status="success", extraction_ms=elapsed, tokens=usage.model_dump(),
                              cheques=[_cheque_summary(c) for c in result.cheques])
@@ -145,6 +163,21 @@ def infer_installments(cheques: list[ChequeEntity]) -> None:
                 cheque.installment_number = number
 
 
+_READ_FIELDS = ("cheque_date", "cheque_amount", "amount_in_words", "payee_name", "holder_name", "iban")
+_EXPLAINED = {UnclearField.CHEQUE_AMOUNT, UnclearField.AMOUNT_IN_WORDS, *DATE_FIELDS}
+
+
+def _has_empty_reading(cheques: list[ChequeOcr]) -> bool:
+    """A readable cheque with neither date nor amount, and no unclear mark explaining it."""
+    return any(c.cheque_date is None and c.cheque_amount is None and not c.unreadable
+               and not set(c.unclear_fields) & _EXPLAINED for c in cheques)
+
+
+def _score(cheques: list[ChequeOcr]) -> int:
+    """How much was read: filled fields across all cheques (the fuller reading wins)."""
+    return sum(getattr(c, f) is not None for c in cheques for f in _READ_FIELDS)
+
+
 def _cheque_summary(cheque: ChequeOcr) -> dict:
     """What the trace keeps per cheque: no names or IBANs, only what is needed to debug."""
     return {
@@ -152,6 +185,10 @@ def _cheque_summary(cheque: ChequeOcr) -> dict:
         "date": cheque.cheque_date,
         "amount": cheque.cheque_amount,
         "text_top": cheque.text_top.value if cheque.text_top else None,
+        "micr_box": cheque.micr_box,
+        # Orientation used for rotation: from the MICR line's position, else the model's text_top
+        "orientation": cheque.orientation.value if cheque.orientation else None,
+        "orientation_from": "micr" if cheque.micr_text_top else "text_top",
         "tilt_degrees": cheque.tilt_degrees,
         "needs_crop": cheque.needs_crop,
         "unreadable": cheque.unreadable,

@@ -36,7 +36,7 @@ class UnclearField(str, Enum):
 
 
 DATE_PARTS = (UnclearField.DATE_DAY, UnclearField.DATE_MONTH, UnclearField.DATE_YEAR)
-_DATE_FIELDS = {UnclearField.CHEQUE_DATE, *DATE_PARTS}
+DATE_FIELDS = {UnclearField.CHEQUE_DATE, *DATE_PARTS}
 
 FIELD_LABELS = {
     UnclearField.CHEQUE_DATE: "Date",
@@ -95,7 +95,7 @@ _NEEDS_CLEAR_COPY = {IssueCode.ILLEGIBLE, IssueCode.IMAGE_INCOMPLETE, IssueCode.
 _COVERED_BY_UNCLEAR = {
     IssueCode.ILLEGIBLE: set(CORE_FIELDS),
     IssueCode.AMOUNT_MISSING: {UnclearField.CHEQUE_AMOUNT, UnclearField.AMOUNT_IN_WORDS},
-    IssueCode.DATE_ISSUE: _DATE_FIELDS,
+    IssueCode.DATE_ISSUE: DATE_FIELDS,
     IssueCode.PAYEE_ISSUE: {UnclearField.PAYEE_NAME},
 }
 
@@ -245,6 +245,10 @@ class TextTop(str, Enum):
 # Clockwise turn that brings the text upright
 _QUARTER_TURN = {TextTop.UP: 0, TextTop.RIGHT: -90, TextTop.DOWN: 180, TextTop.LEFT: 90}
 
+# The MICR line's centre must be at least this far from the cheque's centre (as a share of
+# half the cheque's height / width) to tell which edge it is on
+_MICR_MIN_OFFSET = 0.4
+
 
 class ChequeOcr(ChequeEntity):
     """What the OCR model returns per cheque: the entity plus layout for crop / rotation.
@@ -276,6 +280,9 @@ class ChequeOcr(ChequeEntity):
     bounding_box: Optional[list[int]] = Field(
         None, description="[ymin, xmin, ymax, xmax] of the whole cheque, normalised 0-1000"
     )
+    micr_box: Optional[list[int]] = Field(
+        None, description="[ymin, xmin, ymax, xmax] of the MICR code line, normalised 0-1000; null if not visible"
+    )
     text_top: Optional[TextTop] = Field(
         None, description="Direction the top of the cheque's printed text points in the image"
     )
@@ -298,9 +305,37 @@ class ChequeOcr(ChequeEntity):
         return None if number is None else round(number)
 
     @property
+    def micr_text_top(self) -> Optional[TextTop]:
+        """Text direction from where the MICR line sits in the cheque box; None if unclear.
+
+        The MICR line is always along the cheque's bottom edge, so the side of the box it is
+        nearest to is the bottom, and the text top points the other way. Boxes are what the
+        model reads most reliably; its own `text_top` mixes up left and right on sideways photos.
+        """
+        box, micr = self.bounding_box, self.micr_box
+        if not (box and micr and len(box) == 4 and len(micr) == 4):
+            return None
+        half_h, half_w = (box[2] - box[0]) / 2, (box[3] - box[1]) / 2
+        if half_h <= 0 or half_w <= 0 or micr[2] <= micr[0] or micr[3] <= micr[1]:
+            return None  # empty or inverted box: not a real detection
+        # MICR centre relative to the cheque centre, -1..1 on each axis
+        dy = ((micr[0] + micr[2]) / 2 - (box[0] + box[2]) / 2) / half_h
+        dx = ((micr[1] + micr[3]) / 2 - (box[1] + box[3]) / 2) / half_w
+        if max(abs(dx), abs(dy)) < _MICR_MIN_OFFSET:
+            return None  # near the middle: not a usable edge
+        if abs(dy) >= abs(dx):
+            return TextTop.UP if dy > 0 else TextTop.DOWN
+        return TextTop.LEFT if dx > 0 else TextTop.RIGHT
+
+    @property
+    def orientation(self) -> Optional[TextTop]:
+        """Where the top of the text points: from the MICR line when usable, else the model's text_top."""
+        return self.micr_text_top or self.text_top
+
+    @property
     def quarter_turn(self) -> int:
         """Clockwise quarter turn that makes the text upright (0, 90, 180 or -90)."""
-        return _QUARTER_TURN.get(self.text_top, 0)
+        return _QUARTER_TURN.get(self.orientation, 0)
 
     @property
     def rotation_degrees(self) -> float:
@@ -331,7 +366,7 @@ class ChequeOcr(ChequeEntity):
 
     def as_unreadable(self, detail: str) -> "ChequeOcr":
         """Same position on the page, every value dropped: the image is too poor to trust any of it."""
-        return ChequeOcr(page=self.page, bounding_box=self.bounding_box,
+        return ChequeOcr(page=self.page, bounding_box=self.bounding_box, micr_box=self.micr_box,
                          text_top=self.text_top, tilt_degrees=self.tilt_degrees,
                          needs_crop=self.needs_crop,
                          issues=[ChequeIssue(code=IssueCode.IMAGE_INCOMPLETE, detail=detail)])
@@ -350,6 +385,14 @@ class ChequeOcr(ChequeEntity):
                 )
             else:
                 issues.pop(IssueCode.AMOUNT_MISMATCH, None)
+        elif IssueCode.AMOUNT_MISMATCH in issues and self.amount_in_words and self.cheque_amount is not None:
+            # Words the backend cannot convert (e.g. Arabic): keep the model's finding, same wording
+            words = self.amount_in_words.strip().rstrip(".")
+            issues[IssueCode.AMOUNT_MISMATCH] = ChequeIssue(
+                code=IssueCode.AMOUNT_MISMATCH,
+                detail=f"Amount in words ({words}) does not match "
+                       f"figures ({_fmt_amount(self.cheque_amount)})",
+            )
 
         if (self.cheque_amount is None or self.amount_in_words is None) and not (
                 unclear & {UnclearField.CHEQUE_AMOUNT, UnclearField.AMOUNT_IN_WORDS}):
@@ -359,7 +402,7 @@ class ChequeOcr(ChequeEntity):
         # only a cheque with no usable date at all is flagged here
         if parse_date(self.cheque_date) is not None:
             issues.pop(IssueCode.DATE_ISSUE, None)
-        elif not unclear & _DATE_FIELDS:
+        elif not unclear & DATE_FIELDS:
             issues.setdefault(IssueCode.DATE_ISSUE, ChequeIssue(code=IssueCode.DATE_ISSUE,
                                                                 detail="date missing"))
 

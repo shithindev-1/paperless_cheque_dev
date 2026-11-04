@@ -1,7 +1,7 @@
 """Match extracted cheques against expected rent payments.
 
 A cheque matches when Amount and DueDate match, every optional field the caller sent
-(ChequepayeeName, ChequeHolderName, ChequeHolderNameAr, ChequeHolderIBAN) matches, and the cheque itself has
+(cheque_info: ChequepayeeName, ChequeHolderName, ChequeHolderNameAr, ChequeHolderIBAN) matches, and the cheque itself has
 no problems (alteration, words vs figures, stale date, missing signature, unclear fields, ...).
 Fields the OCR marks as unclear are never compared; the caller is asked for a clear copy.
 """
@@ -13,7 +13,7 @@ from datetime import date
 from typing import Optional
 
 from app.schemas import ChequeEntity, FileResult, RentPayment
-from app.schemas.cheque import CLEAR_COPY, CORE_FIELDS, IssueCode, UnclearField
+from app.schemas.cheque import CLEAR_COPY, CORE_FIELDS, DATE_FIELDS, IssueCode, UnclearField
 from app.utils.arabic import arabic_to_latin, western_digits
 from app.utils.dates import parse_date
 
@@ -36,6 +36,10 @@ class _Candidate:
 
     def unclear(self, field: UnclearField) -> bool:
         return field in self.cheque.unclear_fields
+
+    @property
+    def date_unclear(self) -> bool:
+        return any(f in DATE_FIELDS for f in self.cheque.unclear_fields)
 
 
 def _same_amount(a: Optional[float], b: float) -> bool:
@@ -128,7 +132,7 @@ def _checks(payment: RentPayment, c: _Candidate) -> tuple[list[str], list[str], 
     extra_unclear: list[UnclearField] = []
     checks = () if c.cheque.unreadable else _NAME_CHECKS  # never compare values from a bad image
     for key, field, label in checks:
-        expected = (getattr(payment, key) or "").strip()
+        expected = payment.expected(key)
         if not expected:
             continue
         if c.unclear(field):  # never compared; payee is already reported as a core field
@@ -152,7 +156,7 @@ def _checks(payment: RentPayment, c: _Candidate) -> tuple[list[str], list[str], 
             mismatches.append(f"{label} doesn't match. Cheque shows {text}.")
     unclear = c.cheque.unclear(tuple(extra_unclear))
     # A sent payee name is compared above, so the cheque's own "payee missing" would repeat it
-    skip = frozenset({IssueCode.PAYEE_ISSUE}) if (payment.ChequepayeeName or "").strip() else frozenset()
+    skip = frozenset({IssueCode.PAYEE_ISSUE}) if payment.expected("ChequepayeeName") else frozenset()
     return c.cheque.issue_messages(unclear, skip), mismatches, c.cheque.unclear_messages(unclear)
 
 
@@ -219,12 +223,19 @@ def _no_match(
     if not unused:
         return None, "No matching cheque. All cheques are already matched to other payments."
 
-    def date_gap(c: _Candidate) -> int:
-        return abs((c.cheque_date - due).days) if c.cheque_date else 10**9
+    # An unclear or missing value may be the right one, so it ranks before a clearly different
+    # value (and the reply then reports that cheque's problem instead of blaming another one).
+    # Order: same value, unclear, missing, different (nearest first).
+    def date_gap(c: _Candidate) -> tuple[int, int]:
+        if c.cheque_date:
+            return (0, 0) if c.cheque_date == due else (3, abs((c.cheque_date - due).days))
+        return (1, 0) if c.date_unclear else (2, 0)
 
-    def amount_gap(c: _Candidate) -> float:
+    def amount_gap(c: _Candidate) -> tuple[int, float]:
         a = c.cheque.cheque_amount
-        return abs(a - payment.Amount) if a is not None else float("inf")
+        if a is not None:
+            return (0, 0.0) if _same_amount(a, payment.Amount) else (3, abs(a - payment.Amount))
+        return (1, 0.0) if c.unclear(UnclearField.CHEQUE_AMOUNT) else (2, 0.0)
 
     def issue_count(c: _Candidate) -> int:
         return len(_other_issues(payment, c))

@@ -27,6 +27,12 @@ class InvalidRequestError(AppError):
     message = "Invalid request."
 
 
+class InvalidPaymentsError(AppError):
+    status_code = 422
+    message = ("Invalid 'payments'. Send a JSON list of payments, each with Amount and a valid "
+               "DueDate, e.g. [{\"Amount\": 9333, \"DueDate\": \"2026-01-01\"}].")
+
+
 class FileValidationError(AppError):
     status_code = 400
     message = "Invalid file."

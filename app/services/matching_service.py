@@ -1,4 +1,7 @@
-"""Use case: match cheque files against expected payments (POST /cheques/match).
+"""Use case: match cheque files against expected payments.
+
+POST /cheques/match         files given as URLs (blob) or, locally, names inside LOCAL_FILES_DIR
+POST /cheques/match/upload  files uploaded in the request (form-data); same checks and response
 
 Stages (each timed in the request trace): load -> extraction -> matching -> cropping.
 """
@@ -11,20 +14,23 @@ from collections import Counter
 from typing import Optional, Union
 
 import httpx
+from fastapi import UploadFile
+from pydantic import TypeAdapter, ValidationError
 
 from app.core.config import Settings
-from app.core.exceptions import AppError, InvalidRequestError
+from app.core.exceptions import AppError, FileValidationError, InvalidPaymentsError, InvalidRequestError
 from app.core.tracing import RequestTrace, current_trace
 from app.schemas import FileResult, MatchRequest, RentPayment, TokenUsage
+from app.schemas.matching import CHEQUE_INFO_KEYS
 from app.services.cheque_extractor import ChequeExtractor
 from app.services.cheque_imaging import attach_cheque_files
 from app.services.file_loader import file_name_from_source, load_file, redact
 from app.services.payment_matcher import Match, match_payments
-from app.utils.files import UploadedFile
+from app.utils.files import UploadedFile, read_and_validate
 
 logger = logging.getLogger(__name__)
 
-_NAME_KEYS = ("ChequepayeeName", "ChequeHolderName", "ChequeHolderNameAr", "ChequeHolderIBAN")
+_PAYMENTS = TypeAdapter(list[RentPayment])
 
 
 async def match_cheques(
@@ -34,14 +40,7 @@ async def match_cheques(
     trace = current_trace() or RequestTrace("POST", "match", None, None, {})
     trace.set(type="match")
     trace.count(files=len(request.file_urls), payments=len(request.payments))
-    if not request.payments:
-        raise InvalidRequestError("The payment list is empty.")
-    if not request.file_urls:
-        raise InvalidRequestError("No file URLs provided.")
-    if len(request.file_urls) > settings.max_files_per_request:
-        raise InvalidRequestError(
-            f"Too many files. Send at most {settings.max_files_per_request} file URLs per request."
-        )
+    _check_counts(len(request.file_urls), request.payments, settings, "file URLs")
 
     request_id = trace.request_id  # full GUID: also names the cropped-files folder
     sources, payments = request.file_urls, request.payments
@@ -50,15 +49,83 @@ async def match_cheques(
 
     with trace.stage("load"):
         loaded = await _load_all(sources, settings, trace, request_id)
+    return await _match(sources, loaded, payments, settings, extractor, trace)
+
+
+async def match_uploads(
+    files: list[UploadFile], payments_json: str, settings: Settings, extractor: ChequeExtractor
+) -> list[RentPayment]:
+    """Same as match_cheques, for files uploaded in the request. MatchedOcrFileURL is the file name."""
+    trace = current_trace() or RequestTrace("POST", "match_upload", None, None, {})
+    trace.set(type="match_upload")
+    payments = parse_payments(payments_json)
+    trace.count(files=len(files), payments=len(payments))
+    _check_counts(len(files), payments, settings, "files")
+
+    request_id = trace.request_id
+    sources = [f.filename or "unnamed" for f in files]
+    logger.info("[%s] Match upload request: %d file(s), %d payment(s), model=%s",
+                request_id, len(sources), len(payments), settings.gemini_model)
+
+    with trace.stage("load"):
+        loaded = [await _read_upload(f, settings, trace, request_id) for f in files]
+    return await _match(sources, loaded, payments, settings, extractor, trace, uploaded=True)
+
+
+def parse_payments(payments_json: str) -> list[RentPayment]:
+    """The 'payments' form field: a JSON list of payments, same keys as in /cheques/match."""
+    try:
+        return _PAYMENTS.validate_json(payments_json or "")
+    except ValidationError as exc:
+        logger.warning("Invalid 'payments' field: %s",
+                       [(e.get("loc"), e.get("msg")) for e in exc.errors()])
+        raise InvalidPaymentsError() from None
+
+
+def _check_counts(files: int, payments: list[RentPayment], settings: Settings, what: str) -> None:
+    if not payments:
+        raise InvalidRequestError("The payment list is empty.")
+    if not files:
+        raise InvalidRequestError(f"No {what} provided.")
+    if files > settings.max_files_per_request:
+        raise InvalidRequestError(
+            f"Too many files. Send at most {settings.max_files_per_request} {what} per request."
+        )
+
+
+async def _match(
+    sources: list[str], loaded: list[Union[UploadedFile, FileResult]], payments: list[RentPayment],
+    settings: Settings, extractor: ChequeExtractor, trace: RequestTrace, uploaded: bool = False,
+) -> list[RentPayment]:
+    request_id = trace.request_id
     with trace.stage("extraction"):
         results, uploads = await _extract(loaded, extractor)
     with trace.stage("matching"):
         matches = match_payments(payments, list(zip(sources, results)))
     with trace.stage("cropping"):
-        await _crop_matched(matches, sources, results, uploads, settings, request_id)
+        await _crop_matched(matches, sources, results, uploads, settings, request_id, uploaded)
 
     _log(request_id, trace, results, payments, matches)
     return payments
+
+
+async def _read_upload(
+    upload: UploadFile, settings: Settings, trace: RequestTrace, request_id: str
+) -> Union[UploadedFile, FileResult]:
+    """Read + validate one uploaded file; an invalid file becomes an error FileResult."""
+    name = upload.filename or "unnamed"
+    start = time.perf_counter()
+    try:
+        file = await read_and_validate(upload, settings)
+    except FileValidationError as exc:
+        logger.warning("[%s] Rejected %s: %s", request_id, name, exc.message)
+        trace.new_file(source=name, name=name, status="rejected", error=exc.message,
+                       load_ms=int((time.perf_counter() - start) * 1000))
+        return FileResult(file_name=name, status="error", error=exc.message)
+    entry = trace.new_file(source=name, name=file.name, mime_type=file.mime_type,
+                           size_kb=round(len(file.data) / 1024, 1),
+                           load_ms=int((time.perf_counter() - start) * 1000))
+    return dataclasses.replace(file, trace=entry)
 
 
 async def _load_all(
@@ -86,7 +153,7 @@ async def _extract(
 
 async def _crop_matched(
     matches: list[Match], sources: list[str], results: list[FileResult],
-    uploads: dict[int, UploadedFile], settings: Settings, request_id: str,
+    uploads: dict[int, UploadedFile], settings: Settings, request_id: str, uploaded: bool = False,
 ) -> None:
     """Crop / rotate only the matched cheques and set CroppedOCRFileURL on their payments."""
     wanted: dict[int, set[int]] = {}
@@ -94,7 +161,8 @@ async def _crop_matched(
         wanted.setdefault(m.file_index, set()).add(m.cheque_index)
 
     await asyncio.gather(*(
-        attach_cheque_files(sources[f], uploads[f], results[f], settings, request_id, only=indexes)
+        attach_cheque_files(sources[f], uploads[f], results[f], settings, request_id,
+                            only=indexes, uploaded=uploaded)
         for f, indexes in wanted.items()
     ))
     for m in matches:
@@ -159,7 +227,7 @@ def _log(
             "Installment": p.Installment,
             "Amount": p.Amount,
             "DueDate": p.DueDate,
-            "checks_sent": [k for k in _NAME_KEYS if getattr(p, k)],  # which, never the values
+            "checks_sent": [k for k in CHEQUE_INFO_KEYS if p.expected(k)],  # which, never the values
             "matched": p.MatchedWithOcr,
             "matched_cheque": dict(zip(("file", "cheque"), matched_at[id(p)])) if id(p) in matched_at else None,
             "file": redact(p.MatchedOcrFileURL) if p.MatchedOcrFileURL else None,
