@@ -104,6 +104,7 @@ changing `APP_ENV`, the matching `settings.<env>.json` and the secrets in `.env`
 | `gemini_temperature`, `gemini_top_p`, `gemini_top_k`, `gemini_thinking_*` | Sampling / reasoning |
 | `image_processing_enabled`, `crop_padding_percent`, `pdf_render_dpi` | Crop / rotation |
 | `processed_folder` | Folder for cropped cheques (`<folder>/<request id>/`); empty = next to the original |
+| `case_study_enabled`, `case_study_folder` | Case study of failed matches (see below); empty folder = off |
 
 ### Authentication
 
@@ -282,6 +283,25 @@ With `processed_folder` empty, the PDF is saved next to the original (`.../<name
 processed image of that cheque, or `null` when no processing was needed (or it failed). Files under `azure_blob_base_url` are read and
 written with `AZURE_STORAGE_CONNECTION_STRING`; other URLs are only read. In local
 testing, processed images are written into `local_files_dir`.
+
+#### Case study of failed matches
+
+After the response is sent, a background task keeps every cheque behind a payment with
+`MatchedWithOcr: false`, and every file that could not be read, for review. The response
+and its timing are not affected; errors here are only logged (`CASE_STUDY` in the app log).
+
+```
+<case_study_folder>/<request-id>/<name>_ocr[_N].pdf    the cheque cropped / rotated, or, if not needed,
+<case_study_folder>/<request-id>/<name>.<ext>          the original file
+<case_study_folder>/<request-id>/<name>_case[_N].json  what the OCR read and why each payment failed
+<case_study_folder>/_index/<YYYY-MM-DD>.jsonl          one line per failure (UAE date)
+<case_study_folder>/_seen/<fingerprint>.json           cheques already saved
+```
+
+A cheque is saved once: its fingerprint is the file content hash + cheque number. When the
+same file fails again in a later request, only an index line is added, with `repeat_of` set
+to the first request id. Default folder: `ApplicationFiles/CaseStudy` (blob); locally
+`CaseStudy` inside `local_files_dir`. The case files contain names and IBANs: restrict access.
 
 ---
 

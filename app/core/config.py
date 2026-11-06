@@ -107,6 +107,12 @@ class Settings(BaseSettings):
     pdf_render_dpi: int = Field(200, ge=72, le=600)
     processed_jpeg_quality: int = Field(92, ge=50, le=100)
 
+    # ── Case study (/cheques/match, /cheques/match/upload) ──
+    # After the response, files behind failed matches are copied to <folder>/<request id>/
+    # (inside the container / local_files_dir) with what the OCR read. Empty folder = off.
+    case_study_enabled: bool = True
+    case_study_folder: Optional[str] = None
+
     @field_validator(
         "gemini_top_p", "gemini_top_k", "gemini_seed",
         "gemini_thinking_budget", "gemini_thinking_level", "local_files_dir",

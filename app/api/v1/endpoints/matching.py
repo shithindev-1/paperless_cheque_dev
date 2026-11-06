@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, File, Form, UploadFile
+from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, UploadFile
 
 from app.api.deps import get_cheque_extractor
 from app.core.config import Settings, get_settings
@@ -12,6 +12,7 @@ router = APIRouter(prefix="/cheques", tags=["Cheque Matching"])
 @router.post("/match", response_model=list[RentPayment])
 async def match_cheques_to_payments(
     request: MatchRequest,
+    background: BackgroundTasks,
     settings: Settings = Depends(get_settings),
     extractor: ChequeExtractor = Depends(get_cheque_extractor),
 ) -> list[RentPayment]:
@@ -20,11 +21,12 @@ async def match_cheques_to_payments(
     Returns the payment list with MatchedWithOcr, MatchedOcrFileURL, CroppedOCRFileURL
     and OcrResponse filled. CroppedOCRFileURL is null unless the cheque was cropped / rotated.
     """
-    return await match_cheques(request, settings, extractor)
+    return await match_cheques(request, settings, extractor, background)
 
 
 @router.post("/match/upload", response_model=list[RentPayment])
 async def match_uploaded_cheques_to_payments(
+    background: BackgroundTasks,
     files: list[UploadFile] = File(..., description="One or more cheque images / PDFs"),
     payments: str = Form(
         ...,
@@ -41,4 +43,4 @@ async def match_uploaded_cheques_to_payments(
     Verifies every payment (amount, date, payee / holder / IBAN when sent, cheque issues).
     MatchedOcrFileURL is the uploaded file name; CroppedOCRFileURL is the processed file, if any.
     """
-    return await match_uploads(files, payments, settings, extractor)
+    return await match_uploads(files, payments, settings, extractor, background)

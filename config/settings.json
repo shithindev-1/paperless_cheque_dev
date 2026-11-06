@@ -46,5 +46,11 @@
     "crop_padding_percent": 2.0,
     "pdf_render_dpi": 200,
     "processed_jpeg_quality": 92
+  },
+
+  "case_study": {
+    "_comment": "Files behind failed matches, with what the OCR read: <case_study_folder>/<request id>/; one line per failure in <case_study_folder>/_index/<date>.jsonl",
+    "case_study_enabled": true,
+    "case_study_folder": "ApplicationFiles/CaseStudy"
   }
 }

@@ -21,6 +21,11 @@
     "processed_folder": "ApplicationFiles/<folder>/Cropped"
   },
 
+  "case_study": {
+    "_comment": "Files behind failed matches go to <case_study_folder>/<request id>/. null = off.",
+    "case_study_folder": "ApplicationFiles/CaseStudy"
+  },
+
   "file_urls": {
     "_comment": "Local testing only (APP_ENV=local): folder whose files can be referenced by name.",
     "local_files_dir": null

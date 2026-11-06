@@ -4,6 +4,7 @@ POST /cheques/match         files given as URLs (blob) or, locally, names inside
 POST /cheques/match/upload  files uploaded in the request (form-data); same checks and response
 
 Stages (each timed in the request trace): load -> extraction -> matching -> cropping.
+After the response, files behind failed matches go to the case study (app.services.case_study).
 """
 
 import asyncio
@@ -14,7 +15,7 @@ from collections import Counter
 from typing import Optional, Union
 
 import httpx
-from fastapi import UploadFile
+from fastapi import BackgroundTasks, UploadFile
 from pydantic import TypeAdapter, ValidationError
 
 from app.core.config import Settings
@@ -22,6 +23,7 @@ from app.core.exceptions import AppError, FileValidationError, InvalidPaymentsEr
 from app.core.tracing import RequestTrace, current_trace
 from app.schemas import FileResult, MatchRequest, RentPayment, TokenUsage
 from app.schemas.matching import CHEQUE_INFO_KEYS
+from app.services import case_study
 from app.services.cheque_extractor import ChequeExtractor
 from app.services.cheque_imaging import attach_cheque_files
 from app.services.file_loader import file_name_from_source, load_file, redact
@@ -34,7 +36,8 @@ _PAYMENTS = TypeAdapter(list[RentPayment])
 
 
 async def match_cheques(
-    request: MatchRequest, settings: Settings, extractor: ChequeExtractor
+    request: MatchRequest, settings: Settings, extractor: ChequeExtractor,
+    background: Optional[BackgroundTasks] = None,
 ) -> list[RentPayment]:
     """Load + extract every file, then fill MatchedWithOcr / MatchedOcrFileURL / CroppedOCRFileURL / OcrResponse."""
     trace = current_trace() or RequestTrace("POST", "match", None, None, {})
@@ -49,11 +52,12 @@ async def match_cheques(
 
     with trace.stage("load"):
         loaded = await _load_all(sources, settings, trace, request_id)
-    return await _match(sources, loaded, payments, settings, extractor, trace)
+    return await _match(sources, loaded, payments, settings, extractor, trace, background)
 
 
 async def match_uploads(
-    files: list[UploadFile], payments_json: str, settings: Settings, extractor: ChequeExtractor
+    files: list[UploadFile], payments_json: str, settings: Settings, extractor: ChequeExtractor,
+    background: Optional[BackgroundTasks] = None,
 ) -> list[RentPayment]:
     """Same as match_cheques, for files uploaded in the request. MatchedOcrFileURL is the file name."""
     trace = current_trace() or RequestTrace("POST", "match_upload", None, None, {})
@@ -69,7 +73,8 @@ async def match_uploads(
 
     with trace.stage("load"):
         loaded = [await _read_upload(f, settings, trace, request_id) for f in files]
-    return await _match(sources, loaded, payments, settings, extractor, trace, uploaded=True)
+    return await _match(sources, loaded, payments, settings, extractor, trace, background,
+                        uploaded=True)
 
 
 def parse_payments(payments_json: str) -> list[RentPayment]:
@@ -95,17 +100,23 @@ def _check_counts(files: int, payments: list[RentPayment], settings: Settings, w
 
 async def _match(
     sources: list[str], loaded: list[Union[UploadedFile, FileResult]], payments: list[RentPayment],
-    settings: Settings, extractor: ChequeExtractor, trace: RequestTrace, uploaded: bool = False,
+    settings: Settings, extractor: ChequeExtractor, trace: RequestTrace,
+    background: Optional[BackgroundTasks] = None, uploaded: bool = False,
 ) -> list[RentPayment]:
     request_id = trace.request_id
     with trace.stage("extraction"):
         results, uploads = await _extract(loaded, extractor)
     with trace.stage("matching"):
-        matches = match_payments(payments, list(zip(sources, results)))
+        misses: list[Match] = []
+        matches = match_payments(payments, list(zip(sources, results)), misses)
     with trace.stage("cropping"):
         await _crop_matched(matches, sources, results, uploads, settings, request_id, uploaded)
 
     _log(request_id, trace, results, payments, matches)
+    if background is not None:  # runs after the response is sent; never changes it
+        job = case_study.prepare(sources, results, uploads, payments, misses, settings, trace)
+        if job:
+            background.add_task(case_study.save, job, settings)
     return payments
 
 

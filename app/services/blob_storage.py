@@ -9,7 +9,10 @@ from datetime import datetime, timedelta, timezone
 from typing import Optional
 from urllib.parse import quote, unquote, urlparse
 
-from azure.core.exceptions import AzureError
+from azure.core import MatchConditions
+from azure.core.exceptions import (
+    AzureError, ResourceExistsError, ResourceModifiedError, ResourceNotFoundError,
+)
 from azure.storage.blob import BlobSasPermissions, BlobServiceClient, ContentSettings, generate_blob_sas
 
 from app.core.config import Settings
@@ -43,19 +46,22 @@ class BlobStorage:
 
     def url_for(self, blob_name: str) -> str:
         """Public URL of a blob, with a read-only SAS token if AZURE_SAS_EXPIRY_HOURS > 0."""
-        url = f"https://{self._host}/{self.container}/{quote(blob_name)}"
         hours = self.settings.azure_sas_expiry_hours
-        if not hours:
-            return url
+        return self._read_url(blob_name, timedelta(hours=hours)) if hours else self._plain_url(blob_name)
+
+    def _plain_url(self, blob_name: str) -> str:
+        return f"https://{self._host}/{self.container}/{quote(blob_name)}"
+
+    def _read_url(self, blob_name: str, valid_for: timedelta) -> str:
         token = generate_blob_sas(
             account_name=self._service.account_name,
             container_name=self.container,
             blob_name=blob_name,
             account_key=self._service.credential.account_key,
             permission=BlobSasPermissions(read=True),
-            expiry=datetime.now(timezone.utc) + timedelta(hours=hours),
+            expiry=datetime.now(timezone.utc) + valid_for,
         )
-        return f"{url}?{token}"
+        return f"{self._plain_url(blob_name)}?{token}"
 
     # ── I/O (sync SDK run in a worker thread) ──
 
@@ -65,6 +71,47 @@ class BlobStorage:
     async def upload(self, blob_name: str, data: bytes, content_type: str) -> str:
         await asyncio.to_thread(self._upload, blob_name, data, content_type)
         return self.url_for(blob_name)
+
+    async def copy(self, source_blob: str, blob_name: str) -> str:
+        """Server-side copy inside the container: nothing is downloaded."""
+        await asyncio.to_thread(self._copy, source_blob, blob_name)
+        return self.url_for(blob_name)
+
+    async def create_if_missing(self, blob_name: str, data: bytes, content_type: str) -> bool:
+        """Upload only if the blob does not exist yet; False when it already exists."""
+        return await asyncio.to_thread(self._create_if_missing, blob_name, data, content_type)
+
+    async def append(self, blob_name: str, data: bytes, content_type: str) -> None:
+        """Add data to the end of an append blob, creating it first if needed."""
+        await asyncio.to_thread(self._append, blob_name, data, content_type)
+
+    def _copy(self, source_blob: str, blob_name: str) -> None:
+        client = self._service.get_blob_client(self.container, blob_name)
+        client.start_copy_from_url(self._read_url(source_blob, timedelta(minutes=15)),
+                                   requires_sync=True)
+
+    def _create_if_missing(self, blob_name: str, data: bytes, content_type: str) -> bool:
+        client = self._service.get_blob_client(self.container, blob_name)
+        try:
+            client.upload_blob(data, overwrite=False,
+                               content_settings=ContentSettings(content_type=content_type))
+            return True
+        except ResourceExistsError:
+            return False
+
+    def _append(self, blob_name: str, data: bytes, content_type: str) -> None:
+        client = self._service.get_blob_client(self.container, blob_name)
+        try:
+            client.append_block(data)
+            return
+        except ResourceNotFoundError:
+            pass
+        try:  # IfMissing: two requests creating the same file must not wipe each other's lines
+            client.create_append_blob(content_settings=ContentSettings(content_type=content_type),
+                                      match_condition=MatchConditions.IfMissing)
+        except (ResourceExistsError, ResourceModifiedError):  # created meanwhile
+            pass
+        client.append_block(data)
 
     def _download(self, blob_name: str) -> tuple[bytes, Optional[str]]:
         client = self._service.get_blob_client(self.container, blob_name)

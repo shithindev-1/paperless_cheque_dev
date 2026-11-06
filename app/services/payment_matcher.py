@@ -174,11 +174,15 @@ class Match:
     cheque_index: int
 
 
-def match_payments(payments: list[RentPayment], files: list[tuple[str, FileResult]]) -> list[Match]:
+def match_payments(
+    payments: list[RentPayment], files: list[tuple[str, FileResult]],
+    misses: Optional[list[Match]] = None,
+) -> list[Match]:
     """Fill MatchedWithOcr / MatchedOcrFileURL / OcrResponse on each payment, in place.
 
     Each cheque is used for at most one payment. CroppedOCRFileURL is left empty here;
-    the caller crops only the returned matches.
+    the caller crops only the returned matches. `misses`, when given, receives each unmatched
+    payment with the cheque its OcrResponse describes (for the case study).
     """
     candidates = [
         _Candidate(url, f, i, c)
@@ -207,6 +211,8 @@ def match_payments(payments: list[RentPayment], files: list[tuple[str, FileResul
             payment.MatchedWithOcr = False
             payment.MatchedOcrFileURL = closest.url if closest else None
             payment.OcrResponse = message
+            if closest and misses is not None:
+                misses.append(Match(payment, closest.file_index, closest.cheque_index))
     return matches
 
 
