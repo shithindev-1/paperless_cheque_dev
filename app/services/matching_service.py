@@ -19,10 +19,13 @@ from fastapi import BackgroundTasks, UploadFile
 from pydantic import TypeAdapter, ValidationError
 
 from app.core.config import Settings
-from app.core.exceptions import AppError, FileValidationError, InvalidPaymentsError, InvalidRequestError
+from app.core.exceptions import (
+    AppError, ChequeInfoInPaymentError, FileValidationError, InvalidChequeInfoError, InvalidPaymentsError,
+    InvalidRequestError,
+)
 from app.core.tracing import RequestTrace, current_trace
-from app.schemas import FileResult, MatchRequest, RentPayment, TokenUsage
-from app.schemas.matching import CHEQUE_INFO_KEYS
+from app.schemas import ChequeInfo, FileResult, MatchRequest, MatchResponse, RentPayment, TokenUsage
+from app.schemas.matching import CHEQUE_INFO_IN_PAYMENT, CHEQUE_INFO_KEYS, share_cheque_info
 from app.services import case_study
 from app.services.cheque_extractor import ChequeExtractor
 from app.services.cheque_imaging import attach_cheque_files
@@ -38,7 +41,7 @@ _PAYMENTS = TypeAdapter(list[RentPayment])
 async def match_cheques(
     request: MatchRequest, settings: Settings, extractor: ChequeExtractor,
     background: Optional[BackgroundTasks] = None,
-) -> list[RentPayment]:
+) -> MatchResponse:
     """Load + extract every file, then fill MatchedWithOcr / MatchedOcrFileURL / CroppedOCRFileURL / OcrResponse."""
     trace = current_trace() or RequestTrace("POST", "match", None, None, {})
     trace.set(type="match")
@@ -52,17 +55,20 @@ async def match_cheques(
 
     with trace.stage("load"):
         loaded = await _load_all(sources, settings, trace, request_id)
-    return await _match(sources, loaded, payments, settings, extractor, trace, background)
+    payments = await _match(sources, loaded, payments, settings, extractor, trace, background)
+    return MatchResponse(cheque_info=request.cheque_info, payments=payments)
 
 
 async def match_uploads(
     files: list[UploadFile], payments_json: str, settings: Settings, extractor: ChequeExtractor,
-    background: Optional[BackgroundTasks] = None,
-) -> list[RentPayment]:
+    background: Optional[BackgroundTasks] = None, cheque_info_json: Optional[str] = None,
+) -> MatchResponse:
     """Same as match_cheques, for files uploaded in the request. MatchedOcrFileURL is the file name."""
     trace = current_trace() or RequestTrace("POST", "match_upload", None, None, {})
     trace.set(type="match_upload")
     payments = parse_payments(payments_json)
+    cheque_info = parse_cheque_info(cheque_info_json)
+    share_cheque_info(payments, cheque_info)
     trace.count(files=len(files), payments=len(payments))
     _check_counts(len(files), payments, settings, "files")
 
@@ -73,8 +79,9 @@ async def match_uploads(
 
     with trace.stage("load"):
         loaded = [await _read_upload(f, settings, trace, request_id) for f in files]
-    return await _match(sources, loaded, payments, settings, extractor, trace, background,
-                        uploaded=True)
+    payments = await _match(sources, loaded, payments, settings, extractor, trace, background,
+                            uploaded=True)
+    return MatchResponse(cheque_info=cheque_info, payments=payments)
 
 
 def parse_payments(payments_json: str) -> list[RentPayment]:
@@ -84,7 +91,22 @@ def parse_payments(payments_json: str) -> list[RentPayment]:
     except ValidationError as exc:
         logger.warning("Invalid 'payments' field: %s",
                        [(e.get("loc"), e.get("msg")) for e in exc.errors()])
+        if any(e.get("type") == CHEQUE_INFO_IN_PAYMENT for e in exc.errors()):
+            raise ChequeInfoInPaymentError() from None
         raise InvalidPaymentsError() from None
+
+
+def parse_cheque_info(cheque_info_json: Optional[str]) -> Optional[ChequeInfo]:
+    """The optional 'cheque_info' form field: a JSON object, same keys as in /cheques/match."""
+    text = (cheque_info_json or "").strip()
+    if not text or text == "null":
+        return None
+    try:
+        return ChequeInfo.model_validate_json(text)
+    except ValidationError as exc:
+        logger.warning("Invalid 'cheque_info' field: %s",
+                       [(e.get("loc"), e.get("msg")) for e in exc.errors()])
+        raise InvalidChequeInfoError() from None
 
 
 def _check_counts(files: int, payments: list[RentPayment], settings: Settings, what: str) -> None:

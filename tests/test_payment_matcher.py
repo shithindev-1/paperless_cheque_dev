@@ -1,4 +1,8 @@
-from app.schemas import ChequeEntity, FileResult, RentPayment
+import pytest
+from pydantic import ValidationError
+
+from app.schemas import ChequeEntity, ChequeInfo, FileResult, MatchRequest, RentPayment
+from app.schemas.matching import CHEQUE_INFO_IN_PAYMENT, CHEQUE_INFO_KEYS, share_cheque_info
 from app.services.payment_matcher import MATCHED, match_payments
 
 
@@ -120,40 +124,56 @@ def _named_file(**fields) -> tuple[str, FileResult]:
     return "n.pdf", FileResult(file_name="n.pdf", status="success", cheques=[cheque])
 
 
+def _with_info(amount: float, due: str, **fields) -> RentPayment:
+    """A payment checked against the request's cheque_info (the cheque_info keys in `fields`)."""
+    info = {k: fields.pop(k) for k in CHEQUE_INFO_KEYS if k in fields}
+    payment = RentPayment(Amount=amount, DueDate=due, **fields)
+    share_cheque_info([payment], ChequeInfo(**info) if info else None)
+    return payment
+
+
 def _named_payment(**fields) -> RentPayment:
-    return RentPayment(Amount=8400, DueDate="2026-11-05", **fields)
+    return _with_info(8400, "2026-11-05", **fields)
 
 
-def test_cheque_info_object_is_checked_and_returned():
-    payment = RentPayment.model_validate({
-        "Amount": 8400, "DueDate": "2026-11-05",
-        "cheque_info": {"ChequepayeeName": "ABC LLC", "ChequeHolderName": "Omar Ali",
-                        "ChequeHolderIBAN": "AE07 0331 2345 6789 0123 456"},
-    })
+def test_top_level_cheque_info_is_checked_and_not_repeated_on_payments():
+    request = MatchRequest(
+        file_urls=["n.pdf"],
+        cheque_info={"ChequepayeeName": "ABC LLC", "ChequeHolderName": "Omar Ali",
+                     "ChequeHolderIBAN": "AE07 0331 2345 6789 0123 456"},
+        payments=[{"Amount": 8400, "DueDate": "2026-11-05"}],
+    )
+    [payment] = request.payments
     match_payments([payment], [_named_file(payee_name="ABC LLC", holder_name="Omar Aly",
                                            iban="AE070331234567890123456")])
     assert payment.OcrResponse == "Holder name doesn't match. Cheque shows Omar Aly."
-    dumped = payment.model_dump()
-    assert dumped["cheque_info"] == {"ChequepayeeName": "ABC LLC", "ChequeHolderName": "Omar Ali",
-                                     "ChequeHolderNameAr": None,
-                                     "ChequeHolderIBAN": "AE07 0331 2345 6789 0123 456"}
-    assert "ChequepayeeName" not in dumped
+    assert "cheque_info" not in payment.model_dump()
 
 
-def test_flat_keys_still_accepted_and_moved_into_cheque_info():
-    payment = RentPayment.model_validate({"Amount": 1, "DueDate": "2026-11-05",
-                                          "ChequeHolderName": "Omar Ali",
-                                          "cheque_info": {"ChequepayeeName": "ABC LLC"}})
-    assert payment.expected("ChequeHolderName") == "Omar Ali"
-    assert payment.expected("ChequepayeeName") == "ABC LLC"
-    assert "ChequeHolderName" not in payment.model_dump()
+@pytest.mark.parametrize("extra", [
+    {"cheque_info": {"ChequepayeeName": "ABC LLC"}},
+    {"ChequeHolderName": "Omar Ali"},  # earlier flat format
+])
+def test_cheque_info_inside_a_payment_is_rejected(extra):
+    with pytest.raises(ValidationError) as exc:
+        MatchRequest(file_urls=["n.pdf"], cheque_info={"ChequepayeeName": "X"},
+                     payments=[{"Amount": 1, "DueDate": "2026-11-05", **extra}])
+    assert exc.value.errors()[0]["type"] == CHEQUE_INFO_IN_PAYMENT
 
 
-def test_cheque_info_null_or_empty_means_no_checks():
-    for info in (None, {}, {"ChequepayeeName": "  "}):
-        payment = RentPayment.model_validate({"Amount": 8400, "DueDate": "2026-11-05", "cheque_info": info})
-        match_payments([payment], [_named_file(payee_name="Someone Else")])
-        assert payment.OcrResponse == MATCHED
+@pytest.mark.parametrize("extra", [{"cheque_info": None}, {"cheque_info": {}},
+                                   {"cheque_info": {"ChequepayeeName": None}}, {"ChequepayeeName": " "}])
+def test_empty_cheque_info_inside_a_payment_is_ignored(extra):
+    payment = RentPayment.model_validate({"Amount": 1, "DueDate": "2026-11-05", **extra})
+    assert "cheque_info" not in payment.model_dump() and "ChequepayeeName" not in payment.model_dump()
+
+
+@pytest.mark.parametrize("info", [None, {}, {"ChequepayeeName": "  "}])
+def test_cheque_info_null_or_empty_means_no_checks(info):
+    request = MatchRequest(file_urls=["n.pdf"], cheque_info=info,
+                           payments=[{"Amount": 8400, "DueDate": "2026-11-05"}])
+    match_payments(request.payments, [_named_file(payee_name="Someone Else")])
+    assert request.payments[0].OcrResponse == MATCHED
 
 
 def test_names_not_sent_are_not_checked():
@@ -186,7 +206,7 @@ def test_name_letter_difference_is_reported():
 
 
 def test_name_mismatch_added_to_date_mismatch():
-    payments = [RentPayment(Amount=8400, DueDate="2026-12-05", ChequeHolderName="X")]
+    payments = [_with_info(8400, "2026-12-05", ChequeHolderName="X")]
     match_payments(payments, [_named_file(holder_name="Y")])
     assert payments[0].OcrResponse == ("Date doesn't match. Cheque date is 05-11-2026. "
                                        "Holder name doesn't match. Cheque shows Y.")
@@ -267,7 +287,7 @@ def test_english_name_matches_arabic_only_cheque_without_ocr_spelling():
 
 
 def test_arabic_digits_on_cheque_and_in_request():
-    payments = [RentPayment(Amount=6250, DueDate="١٠/١١/٢٠٢٦", ChequeHolderIBAN="AE07 0331 2345 6789 0123 456")]
+    payments = [_with_info(6250, "١٠/١١/٢٠٢٦", ChequeHolderIBAN="AE07 0331 2345 6789 0123 456")]
     match_payments(payments, [_arabic_named_file(cheque_amount="٦٬٢٥٠٫٠٠", cheque_date="٢٠٢٦/١١/١٠",
                                                  amount_in_words="Six Thousand Two Hundred Fifty Only",
                                                  iban="AE٠٧ ٠٣٣١ ٢٣٤٥ ٦٧٨٩ ٠١٢٣ ٤٥٦")])
@@ -316,7 +336,7 @@ def _ocr_cheque(**fields):
 
 
 def _match_one(cheque, **payment_fields) -> RentPayment:
-    payment = RentPayment(Amount=8400, DueDate=cheque.cheque_date or "2026-01-01", **payment_fields)
+    payment = _with_info(8400, cheque.cheque_date or "2026-01-01", **payment_fields)
     match_payments([payment], [("n.pdf", FileResult(file_name="n.pdf", status="success", cheques=[cheque]))])
     return payment
 
@@ -504,7 +524,7 @@ def test_unclear_value_is_dropped_never_compared():
 def test_blurred_cheque_only_asks_for_clear_copy():
     cheque = _ocr_cheque(unclear_fields=["cheque_date"],
                          issues=[{"code": "IMAGE_INCOMPLETE", "detail": "Image is extremely blurry"}])
-    payment = RentPayment(Amount=5000, DueDate="2027-03-05", ChequepayeeName="Someone")  # not compared
+    payment = _with_info(5000, "2027-03-05", ChequepayeeName="Someone")  # not compared
     match_payments([payment], [("b.jpg", FileResult(file_name="b.jpg", status="success",
                                                     cheques=[cheque]))])
     assert payment.MatchedWithOcr is False
@@ -527,3 +547,14 @@ def test_long_model_detail_is_dropped():
     assert _match_one(cheque).OcrResponse == ("Overwriting or strike-through found. "
                                               "UAE banks do not accept altered cheques. "
                                               "Please provide a new cheque.")
+
+
+def test_request_level_cheque_info_is_checked_for_every_payment():
+    request = MatchRequest(
+        file_urls=["c.pdf"],
+        cheque_info={"ChequepayeeName": "Someone Else", "ChequeHolderIBAN": ""},
+        payments=[{"RentPaymentId": 1, "Amount": 5000, "DueDate": "2026-10-01"},
+                  {"RentPaymentId": 2, "Amount": 5000, "DueDate": "2026-11-01"}],
+    )
+    assert [p.expected("ChequepayeeName") for p in request.payments] == ["Someone Else"] * 2
+    assert request.payments[0].expected("ChequeHolderIBAN") == ""  # empty = not checked

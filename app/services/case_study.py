@@ -263,7 +263,7 @@ def _payment(p: RentPayment) -> dict:
         "Installment": p.Installment,
         "Amount": p.Amount,
         "DueDate": p.DueDate,
-        "cheque_info": p.cheque_info.model_dump() if p.cheque_info else None,
+        "cheque_info": p.expected_info(),  # the request's cheque_info, as checked
         "OcrResponse": p.OcrResponse,
     }
 

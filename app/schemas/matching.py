@@ -3,12 +3,17 @@
 from datetime import date
 from typing import Optional, Union
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, field_validator, model_validator
+from pydantic_core import PydanticCustomError
 
 from app.utils.dates import parse_date
 
 # Keys of cheque_info, each checked against the cheque only when a value is sent
 CHEQUE_INFO_KEYS = ("ChequepayeeName", "ChequeHolderName", "ChequeHolderNameAr", "ChequeHolderIBAN")
+# Error type (and client message) when a payment carries cheque_info itself
+CHEQUE_INFO_IN_PAYMENT = "cheque_info_in_payment"
+CHEQUE_INFO_IN_PAYMENT_MESSAGE = ("Send cheque_info once at the top level of the request, "
+                                  "not inside a payment.")
 
 
 class ChequeInfo(BaseModel):
@@ -35,11 +40,8 @@ class RentPayment(BaseModel):
     DueDate: str = Field(
         ..., description="Any common format, e.g. 2026-11-05T00:00:00, 05/11/2026, 5 Nov 2026"
     )
-    # Optional: payee / holder / IBAN, checked against the cheque only when a value is sent
-    cheque_info: Optional[ChequeInfo] = Field(
-        None, description="Expected cheque details: ChequepayeeName, ChequeHolderName, "
-                          "ChequeHolderNameAr, ChequeHolderIBAN"
-    )
+    # The request's top-level cheque_info (set by the API; never returned on the payment)
+    _shared_info: Optional[ChequeInfo] = PrivateAttr(None)
 
     # Filled by the API; any value sent in the request is ignored
     MatchedWithOcr: Optional[bool] = None
@@ -51,24 +53,26 @@ class RentPayment(BaseModel):
 
     @model_validator(mode="before")
     @classmethod
-    def _flat_keys_into_cheque_info(cls, data):
-        """Earlier format: the keys sat on the payment itself. Moved into cheque_info
-        (a value already in cheque_info wins)."""
-        if not isinstance(data, dict) or not any(k in data for k in CHEQUE_INFO_KEYS):
+    def _no_cheque_info_in_payment(cls, data):
+        """cheque_info is sent once, at the top level. A payment carrying it (as an object or as
+        the earlier flat keys) is rejected; empty / null values there are just dropped."""
+        if not isinstance(data, dict):
             return data
-        data = dict(data)
-        info = data.get("cheque_info")
-        info = dict(info) if isinstance(info, dict) else {}
-        for key in CHEQUE_INFO_KEYS:
-            value = data.pop(key, None)
-            if info.get(key) is None and value is not None:
-                info[key] = value
-        data["cheque_info"] = info
-        return data
+        keys = [k for k in ("cheque_info", *CHEQUE_INFO_KEYS) if k in data]
+        if not keys:
+            return data
+        if any(_has_value(data[k]) for k in keys):
+            raise PydanticCustomError(CHEQUE_INFO_IN_PAYMENT, CHEQUE_INFO_IN_PAYMENT_MESSAGE)
+        return {k: v for k, v in data.items() if k not in keys}
 
     def expected(self, key: str) -> str:
-        """The value sent for a cheque_info key, stripped; '' when not sent."""
-        return (getattr(self.cheque_info, key, None) or "").strip() if self.cheque_info else ""
+        """The request's cheque_info value for this key, stripped; '' when not sent."""
+        info = self._shared_info
+        return (getattr(info, key, None) or "").strip() if info else ""
+
+    def expected_info(self) -> dict:
+        """The cheque_info values actually checked for this payment (for the case study)."""
+        return {key: self.expected(key) or None for key in CHEQUE_INFO_KEYS}
 
     @field_validator("DueDate")
     @classmethod
@@ -94,4 +98,31 @@ class MatchRequest(BaseModel):
         description="Azure file URLs of the cheque images / PDFs "
                     "(or file names inside LOCAL_FILES_DIR for local testing)",
     )
+    cheque_info: Optional[ChequeInfo] = Field(
+        None, description="Expected cheque details for every payment: ChequepayeeName, "
+                          "ChequeHolderName, ChequeHolderNameAr, ChequeHolderIBAN"
+    )
     payments: list[RentPayment] = Field(..., description="Expected payments to match")
+
+    @model_validator(mode="after")
+    def _share_cheque_info(self):
+        share_cheque_info(self.payments, self.cheque_info)
+        return self
+
+
+class MatchResponse(BaseModel):
+    """Same shape as the request: cheque_info once, then the payments with their results."""
+    cheque_info: Optional[ChequeInfo] = None
+    payments: list[RentPayment]
+
+
+def share_cheque_info(payments: list[RentPayment], info: Optional[ChequeInfo]) -> None:
+    """Apply the request's top-level cheque_info to every payment."""
+    for payment in payments:
+        payment._shared_info = info
+
+
+def _has_value(value) -> bool:
+    if isinstance(value, dict):
+        return any(_has_value(v) for v in value.values())
+    return value is not None and str(value).strip() != ""

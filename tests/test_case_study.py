@@ -35,11 +35,14 @@ class FakeExtractor:
                            cheques=[ChequeOcr(**c) for c in self.cheques[f.name]]) for f in files]
 
 
-def _post(client, payments, files=("a.jpg", "b.jpg")):
+def _post(client, payments, files=("a.jpg", "b.jpg"), cheque_info=None):
+    form = {"payments": json.dumps(payments)}
+    if cheque_info is not None:
+        form["cheque_info"] = json.dumps(cheque_info)
     return client.post(
         "/cheques/match/upload",
         files=[("files", (name, _jpeg(name), "image/jpeg")) for name in files],
-        data={"payments": json.dumps(payments)},
+        data=form,
     )
 
 
@@ -144,11 +147,10 @@ def _folders(tmp_path):
 def test_failed_payments_are_saved_with_original_crop_and_case_json(client, tmp_path):
     response = _post(client, [
         {"RentPaymentId": 1, "Amount": 9000, "DueDate": "2026-01-01"},  # a.jpg, wrong amount
-        {"RentPaymentId": 2, "Amount": 9333, "DueDate": "2026-05-01",
-         "cheque_info": {"ChequeHolderIBAN": "AE070331234567890123456"}},  # b.jpg, wrong date
-    ])
+        {"RentPaymentId": 2, "Amount": 9333, "DueDate": "2026-05-01"},  # b.jpg, wrong date
+    ], cheque_info={"ChequeHolderIBAN": "AE070331234567890123456"})
     assert response.status_code == 200
-    assert [p["MatchedWithOcr"] for p in response.json()] == [False, False]
+    assert [p["MatchedWithOcr"] for p in response.json()["payments"]] == [False, False]
 
     [folder] = _folders(tmp_path)
     assert sorted(p.name for p in folder.iterdir()) == [
@@ -178,7 +180,7 @@ def test_failed_payments_are_saved_with_original_crop_and_case_json(client, tmp_
 def test_matched_request_saves_nothing(client, tmp_path):
     response = _post(client, [{"RentPaymentId": 1, "Amount": 9333, "DueDate": "2026-01-01"},
                               {"RentPaymentId": 2, "Amount": 9333, "DueDate": "2026-03-01"}])
-    assert [p["MatchedWithOcr"] for p in response.json()] == [True, True]
+    assert [p["MatchedWithOcr"] for p in response.json()["payments"]] == [True, True]
     assert _folders(tmp_path) == []
 
 
@@ -195,7 +197,7 @@ def test_saving_errors_never_change_the_response(client, monkeypatch, tmp_path):
 
     response = _post(client, [{"RentPaymentId": 1, "Amount": 1, "DueDate": "2026-01-01"}])
     assert response.status_code == 200
-    assert response.json()[0]["MatchedWithOcr"] is False
+    assert response.json()["payments"][0]["MatchedWithOcr"] is False
     assert _folders(tmp_path) == []
 
 

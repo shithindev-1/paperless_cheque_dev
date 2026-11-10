@@ -7,6 +7,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
+from app.schemas.matching import CHEQUE_INFO_IN_PAYMENT, CHEQUE_INFO_IN_PAYMENT_MESSAGE
 from app.core.exceptions import AppError
 from app.core.tracing import current_trace
 
@@ -35,12 +36,15 @@ async def validation_error_handler(request: Request, exc: RequestValidationError
     # Field path + reason only: the rejected input itself may be large or personal
     _trace_error("RequestValidationError", "Invalid request body",
                  fields=[{"loc": list(e.get("loc", ())), "msg": e.get("msg")} for e in exc.errors()])
+    if any(e.get("type") == CHEQUE_INFO_IN_PAYMENT for e in exc.errors()):
+        return _error(422, CHEQUE_INFO_IN_PAYMENT_MESSAGE)
     if request.url.path.endswith("/match/upload"):
-        return _error(422, "Invalid request. Send the cheque files in 'files' and the payments as a "
-                           "JSON list in 'payments' (form-data).")
+        return _error(422, "Invalid request. Send the cheque files in 'files', the payments as a "
+                           "JSON list in 'payments' and, optionally, 'cheque_info' as a JSON object "
+                           "(form-data).")
     if request.url.path.endswith("/match"):
-        return _error(422, "Invalid request. Send 'file_urls' and 'payments' (each with Amount "
-                           "and a valid DueDate) as JSON.")
+        return _error(422, "Invalid request. Send 'file_urls', optional 'cheque_info' and "
+                           "'payments' (each with Amount and a valid DueDate) as JSON.")
     return _error(422, "Invalid request. Upload one or more files using the 'files' field.")
 
 

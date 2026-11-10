@@ -33,6 +33,17 @@ class InvalidPaymentsError(AppError):
                "DueDate, e.g. [{\"Amount\": 9333, \"DueDate\": \"2026-01-01\"}].")
 
 
+class InvalidChequeInfoError(AppError):
+    status_code = 422
+    message = ("Invalid 'cheque_info'. Send a JSON object, e.g. {\"ChequepayeeName\": \"...\", "
+               "\"ChequeHolderName\": \"...\", \"ChequeHolderNameAr\": \"...\", \"ChequeHolderIBAN\": \"...\"}.")
+
+
+class ChequeInfoInPaymentError(AppError):
+    status_code = 422
+    message = "Send cheque_info once at the top level of the request, not inside a payment."
+
+
 class FileValidationError(AppError):
     status_code = 400
     message = "Invalid file."
